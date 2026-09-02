@@ -121,7 +121,10 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-08-18 — eighteen passes across five sessions. (1) Applied
+- **Last worked:** 2026-09-02 — nineteen passes across six sessions (this session opened without
+  the direct conversation history for passes 9–18 below — resumed entirely from this file, the
+  auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is exactly the
+  point of keeping this file current). (1) Applied
   `Business Logic/grain_logic.md` (raw CSV `Grain` codes are `0`/`1`/`2`, not just `0`/`x`/`y`;
   `1`/`2` were previously unmapped and silently treated as ungrained/rotatable). Fixed in
   `GRAIN_MAP` (`backend/optimizer/parser.py`), see M1 row. (2) Redesigned M3's PDF export to
@@ -471,7 +474,35 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   bottom below, left left-of, right right-of), confirmed editing a field still updates state
   correctly, and screenshotted both dark mode and a narrow mobile viewport to confirm the layout
   and its fallback both render cleanly. `tsc -b`/lint/build all clean. No backend changes, no
-  test count change. Before all eighteen: Phases A/B/C of
+  test count change. (19) Asked to also show, per material, how many panels were cut from it and
+  how many boards of that type were used — the board count already existed in
+  `MaterialBreakdown.tsx` (Phase 2, ROADMAP.md) as "N sheets," relabeled to "N boards" to match
+  the request's wording; added a new per-material panel (parts) count alongside it. Purely
+  frontend, no backend change. Verified in a real headless browser against
+  `panel_saw_machine_data.csv` (2 materials) — correct singular/plural, and, more importantly,
+  the per-material panel counts sum to 50 and board counts sum to 21, exactly matching the
+  Summary card's own job-wide totals for the same run. `tsc -b`/lint/build all clean. **Found,
+  not fixed:** the backend test suite currently has 32 errors + 4 failures, all from
+  `sample_data/`'s golden-XML folder having been renamed (`XML Data for Nanxing Nesting
+  Machine/` → `XML Data from Fin China/`) without the test fixture paths being updated —
+  unrelated to this pass's change, flagged rather than fixed since it wasn't part of what was
+  asked; see "Remaining work" below. See `ROADMAP.md`'s Phase 2 section for the fuller writeup.
+  (20) A screenshot showed `.material-row__label` (in `MaterialBreakdown.tsx`, pass 12/19) being
+  cut off with an ellipsis (`"CP_MDF17_8173_OS_8…"`) — the project owner flagged not being able
+  to tell which material a row was for. Root cause: `.material-row`'s grid gave the label a
+  fixed `minmax(0, 10rem)` column with `text-overflow: ellipsis`/`white-space: nowrap`, too
+  narrow for this app's real material codes (`CC_HDH17_ANY_CL_BS`, `CP_MDF17_8173_OS_8134`,
+  etc). Fixed by restructuring `.material-row` into two grid rows: the label now spans the full
+  row width on its own line (`grid-column: 1 / -1`, `white-space: normal`, no more
+  ellipsis/nowrap), with the waste bar/value/board-count/panel-count on the row below — matches
+  the density of the existing mobile breakpoint's single-column fallback, which needed no
+  further change. Verified in a real headless browser against the real 656-part, 5-material
+  reported job (the same one used in pass 12's original verification): all 5 material labels —
+  including the two longest, `CC_HDH17_ANY_CL_BS` and `CP_MDF17_8173_OS_8134` — render in full
+  with computed `text-overflow: clip` (not `ellipsis`) and `scrollWidth === clientWidth`
+  (nothing clipped), screenshot confirms bold full names on their own line above each bar,
+  zero console errors. `tsc -b`/lint/build all clean. Purely CSS, no component/backend change.
+  Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
   `update_001` (a user-supplied real-world comparison against the actual Nanxing machine
@@ -603,15 +634,23 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
    new corner) that points at the table/machine; if it follows the *file* regardless of corner,
    that reopens the software investigation. `ToolPoint`'s rule is still unknown (defaults to `0`)
    and remains unconfirmed either way. Not something a coding session can do unattended.
-3. **Share a renderer between `SheetPreview.tsx` and the PDF:** still two independent
+3. **Fix stale golden-XML test paths (quick, actionable right now, unlike items 1–2).**
+   `sample_data/`'s XML folder was renamed (`XML Data for Nanxing Nesting Machine/` → `XML Data
+   from Fin China/`) since the paths were last updated in `conftest.py`/`test_xml_roundtrip.py` —
+   currently causes 32 errors + 4 failures in the backend suite. Found during pass 19 (see "Last
+   worked"), deliberately not fixed then since it was unrelated to that pass's request — but
+   worth confirming the new folder name is the intended final one (not itself a temporary/WIP
+   rename) before updating the test paths to point at it.
+4. **Share a renderer between `SheetPreview.tsx` and the PDF:** still two independent
    implementations (M7's own deferred aspiration) — they currently happen to agree on board
    orientation (both portrait, both using the packer's native axes) after M3 Rev 2 switched the
    PDF back to portrait, but that's incidental, not enforced; a future PDF-only orientation
    change could silently diverge them again (see M3/Current-state notes). M3's own remaining
    gap — a cut-sequence overlay — was deliberately skipped since neither reference PDF (Rev 1
    nor Rev 2) shows one; the `cuts` data still isn't wired into `export/pdf.py`, but nothing
-   currently calls for it to be.
-4. **Grain-direction arrow, real-world confirmation:** the length↔vertical/width↔horizontal
+   currently calls for it to be (M9-era passes did add a cut-line *overlay*, see M2/M3-adjacent
+   passes 9–11 in "Last worked" — this item is specifically about a shared renderer, still open).
+5. **Grain-direction arrow, real-world confirmation:** the length↔vertical/width↔horizontal
    mapping in M3 Rev 2 was confirmed with the project owner (not derived from the MaxCut
    reference, which was ambiguous — see M3 row), but still hasn't been checked against an
    actual grain-locked job on real material. Lower risk now than when this was first confirmed:
@@ -619,26 +658,28 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
    does run along the board's *length* axis, matching this mapping exactly — still worth a
    sanity check if/when a grain-locked CSV goes to real material, but no longer just a guess
    backed only by the project owner's say-so.
-5. **Frontend test suite:** `frontend/` has none yet — M7 was verified via type-check, build,
-   lint, and one manual Playwright-driven browser pass, not an automated suite (Vitest/RTL or
-   similar).
-6. **M10 grain-axis fix, real-world confirmation:** verified against real golden Nanxing XML
+6. **Frontend test suite:** `frontend/` has none yet — every UI pass through pass 19 was verified
+   via type-check, build, lint, and a real headless-browser (Playwright) pass, not an automated
+   suite (Vitest/RTL or similar).
+7. **M10 grain-axis fix, real-world confirmation:** verified against real golden Nanxing XML
    data (16 matching `Grain="L"` workpieces, including the exact reported part) and against
    full geometry invariants on the reported job — the strongest evidence this project has for a
    grain-placement rule without an actual cut. Still worth a physical dry-run before fully
    trusting it, same caveat as everything else grain-related (see M6 row's own dry-run gap).
-7. **`waste_strategy="edge"`, real-world confirmation:** verified geometrically (guillotine-
+8. **`waste_strategy="edge"`, real-world confirmation:** verified geometrically (guillotine-
    decomposable, no overlaps, nothing dropped, both machines) and against real CSV job numbers
    (measured utilization + offcut-consolidation improvement — see M4 row), plus visually via a
    rendered PDF. Not yet confirmed on an actual cut sheet that the consolidated wastage is where
    it visually appears to be and is actually more usable as offcut stock in practice.
-8. **M8 offcut reuse:** larger oddments become returnable stock (see Appendix A.6).
-9. **M9, deferred scope:** `update_004.md`'s login/auth, tenant/company modeling, per-machine
-   "available optimizations" config, and CSV-schema-template renaming (Nanxing Nesting →
-   "Template 1", Panel Saw → "Template 2" — mapping already confirmed with the project owner,
-   just not implemented yet) were all explicitly scoped out of the first persistence pass (see
-   M9 row) to land Stock Boards + Waste Placement defaults first. Pick up in that order unless
-   priorities change.
+9. **M8 offcut reuse:** larger oddments become returnable stock (see Appendix A.6).
+10. **M9, deferred scope:** `update_004.md`'s login/auth, tenant/company modeling, per-machine
+    "available optimizations" config, and CSV-schema-template renaming (Nanxing Nesting →
+    "Template 1", Panel Saw → "Template 2" — mapping already confirmed with the project owner,
+    just not implemented yet) were all explicitly scoped out of the first persistence pass (see
+    M9 row) to land Stock Boards + Waste Placement defaults first. Pick up in that order unless
+    priorities change. Note: passes 13–14 (see "Last worked") already delivered cost/preset
+    persistence in this same spirit, so this item is specifically the remaining login/tenancy/
+    per-machine-config/template-rename slice, not the whole of M9's original scope.
 
 ---
 

@@ -728,17 +728,18 @@ th {
 
 .material-row {
   display: grid;
-  grid-template-columns: minmax(0, 10rem) 1fr auto auto;
+  grid-template-columns: 1fr auto auto auto;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.3rem 0.75rem;
 }
 
 .material-row__label {
+  grid-column: 1 / -1;
   font-size: 0.85rem;
+  font-weight: 600;
   color: var(--text-h);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: break-word;
+  white-space: normal;
 }
 
 .material-row__bar-track {
@@ -762,7 +763,8 @@ th {
   white-space: nowrap;
 }
 
-.material-row__count {
+.material-row__count,
+.material-row__panels {
   font-size: 0.8rem;
   color: var(--text-muted);
   white-space: nowrap;

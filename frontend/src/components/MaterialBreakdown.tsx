@@ -9,6 +9,7 @@ interface Props {
 interface Row {
   material: string;
   sheetCount: number;
+  panelCount: number;
   avgUtilizationPct: number;
   avgWastePct: number;
   wasteCost: number;
@@ -27,6 +28,7 @@ function buildRows(sheets: Sheet[], stock: StockBoardWithCost[]): Row[] {
     rows.push({
       material,
       sheetCount: group.length,
+      panelCount: group.reduce((sum, s) => sum + s.placed.length, 0),
       avgUtilizationPct,
       avgWastePct: 100 - avgUtilizationPct,
       wasteCost: totalWasteCost(group, stock),
@@ -59,7 +61,10 @@ export function MaterialBreakdown({ sheets, stock }: Props) {
               {row.avgWastePct.toFixed(1)}% waste{showCost && ` (~${CURRENCY}${row.wasteCost.toFixed(2)})`}
             </span>
             <span className="material-row__count">
-              {row.sheetCount} sheet{row.sheetCount === 1 ? "" : "s"}
+              {row.sheetCount} board{row.sheetCount === 1 ? "" : "s"}
+            </span>
+            <span className="material-row__panels">
+              {row.panelCount} panel{row.panelCount === 1 ? "" : "s"}
             </span>
           </div>
         ))}

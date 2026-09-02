@@ -137,6 +137,29 @@ utilization color tiers all render distinctly. Also visually confirmed in dark m
 properties, so no separate dark-mode work was needed, just verification that it actually held.
 Zero console errors either job. `tsc -b`/lint/build all clean.
 
+**Follow-on, same phase:** asked to also show, per material, how many panels were cut from it
+and how many boards of that material type were used. The board count already existed
+(`sheetCount`, previously labeled "N sheets") — relabeled to "N boards" to match the request's
+own wording, since this app already calls the job-config UI a "Stock Board Library," not a
+"sheet library." Added a new `panelCount` field to `MaterialBreakdown.tsx`'s per-material `Row`
+(`group.reduce((sum, s) => sum + s.placed.length, 0)`) rendered as its own `N panels` span next
+to the board count — two clearly separate, explicitly labeled numbers rather than one combined
+string, matching how the request named them as two distinct things. `.material-row`'s CSS grid
+widened from 4 to 5 columns (`auto`-sized, so it doesn't force the row wider on typical material
+name/percentage lengths); the existing mobile breakpoint already collapses the row to a single
+column regardless of column count, so it needed no separate change. Verified in a real headless
+browser against `panel_saw_machine_data.csv` (2 materials): both new figures render with correct
+singular/plural ("1 board" vs "20 boards"), and — the real correctness check, not just "it
+renders something" — the per-material panel counts sum to 50 and board counts sum to 21,
+exactly matching the Summary card's own "Panels/Parts cut" and "Sheets" totals for the same job.
+Zero console errors. `tsc -b`/lint/build all clean. **Found, not fixed, this pass:** the backend
+test suite has 32 errors + 4 failures unrelated to this change — `sample_data/`'s golden-XML
+folder was renamed (`XML Data for Nanxing Nesting Machine/` → `XML Data from Fin China/`)
+without the test fixture paths being updated, the same class of breakage `CLAUDE.md` already
+warns about ("it has moved before and may again"). Flagged to the project owner rather than
+fixed, since it's unrelated to this request and the rename might need confirming before test
+paths are touched.
+
 ## Phase 3 — Presets & cost tracking ✅ done
 
 First phase touching the backend — reuses the exact CRUD pattern M9 already built for stock
