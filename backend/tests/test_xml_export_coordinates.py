@@ -7,7 +7,7 @@ from optimizer.model import Margin, Offcut, OptResult, Part, PlacedPart, Sheet
 from optimizer.nanxing import optimize as nanxing_optimize
 from optimizer.parser import parse_csv_text
 
-from .conftest import CSV_SAMPLE_DIR
+from .conftest import CSV_SAMPLE_DIR, XML_GOLDEN_DIR
 from .helpers import default_stock_for
 
 # Issues/issues_002.md: a real Nanxing machine load showed every job crammed into a region no
@@ -97,3 +97,43 @@ def test_real_job_workpiece_coordinates_stay_within_declared_board_bounds():
                 if x > board_width:
                     saw_x_exceed_width = True
     assert saw_x_exceed_width, "expected at least one workpiece to use X beyond the board's width — otherwise this test can't tell a correct axis mapping from a swapped one"
+
+
+# Real physical workpiece label (photographed and reported directly, 2026-09-02): the machine's
+# printed "F.S." (Final Size) field — used by the edge-banding team downstream of cutting, not
+# by the machine itself — came out blank. Root cause: the machine reads F.S. from the
+# Workpiece.Info1/Info2 attributes, which optimizer/export/xml.py never emitted at all (an
+# earlier pass had looked for a relationship between Info1/Info2 and Length/Width/CutLength/
+# CutWidth, found none, and left them out — the real relationship turned out to be with a field
+# outside the XML entirely: the source CSV's own Lenght/Width columns). Verified by
+# cross-referencing all 55 barcodes shared between nesting_machine_data.csv and its real
+# machine-cut golden XML: golden Info1/Info2 match the CSV's Lenght/Width columns exactly, no
+# rotation dependency. CutLength/CutWidth/Length/Width are deliberately untouched by this fix —
+# cutting was already correct and nothing reported depends on them.
+def test_real_job_info1_info2_match_golden_finished_size():
+    text = (CSV_SAMPLE_DIR / "nesting_machine_data.csv").read_text(encoding="utf-8-sig")
+    parts, errors = parse_csv_text(text)
+    assert errors == []
+    stock = default_stock_for(parts)
+    margin = Margin(top=10, right=10, bottom=10, left=10)
+    result = nanxing_optimize(parts, stock, margin, spacing=5.0)
+    parts_by_id = {p.id: p for p in parts}
+    xml_bytes = generate_fcc_xml(result, parts_by_id, margin, tool_diameter=6.0, part_spacing=5.0)
+    regen_root = etree.fromstring(xml_bytes)
+    regen_by_id = {wp.get("WorkpieceId"): wp for wp in regen_root.findall(".//Workpiece")}
+
+    golden_file = XML_GOLDEN_DIR / "26Y111T1F1 (1 FLOOR BEDROOM)-FccForNesting-FccPattern.xml"
+    golden_root = etree.parse(str(golden_file)).getroot()
+
+    matched = 0
+    for golden_wp in golden_root.findall(".//Workpiece"):
+        wid = golden_wp.get("WorkpieceId")
+        regen_wp = regen_by_id.get(wid)
+        if regen_wp is None:
+            continue
+        matched += 1
+        assert regen_wp.get("Info1") is not None, f"{wid}: Info1 missing from export"
+        assert regen_wp.get("Info2") is not None, f"{wid}: Info2 missing from export"
+        assert abs(float(golden_wp.get("Info1")) - float(regen_wp.get("Info1"))) <= 0.01, f"{wid}.Info1"
+        assert abs(float(golden_wp.get("Info2")) - float(regen_wp.get("Info2"))) <= 0.01, f"{wid}.Info2"
+    assert matched == 55, f"expected all 55 shared barcodes to be found, got {matched}"

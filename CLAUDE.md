@@ -67,7 +67,7 @@ Key libs: `shapely` (geometry), `rectpack`/custom packers (nesting), `lxml` (FCC
 | M2 | Guillotine optimizer (saw) | 🟢 Fixed + tested | Rewrote placement around a true binary guillotine split (`guillotine_split`) instead of the old 4-way maxrects-style split — free rectangles can no longer overlap by construction. Multi-sheet loop opens new sheets of a board type until every part is placed or genuinely too large for an empty board. Covered by `backend/tests/test_guillotine.py` (7 invariant tests × 2 real sample files, incl. an automated guillotine-decomposability check per spec §7.4). **Verified the suite has teeth**: temporarily restored the original buggy version and reran — 8/14 tests failed (overlaps, dropped parts, non-decomposable layouts), confirming these tests would have caught the original bug. Cut list now flows through to `/optimize`'s response. **`Updates/update_003.md` (2026-08-13): un-shared the placement engine.** It briefly lived in one shared `optimizer/packing.py` (extracted so M4 could reuse it, see that row's old text) — update_003 asked to "maintain separate packers" for the two machines, reinstating this file's own "two machines = two different optimizers" principle at the code level, not just the exporter level. `guillotine.py` now imports its own copy from `optimizer/saw_packing.py`; `nanxing.py` imports an independent copy from `optimizer/nanxing_packing.py` (see M4 row) — deliberately duplicated, not shared, so a future change to one can't silently affect the other. Both copies also gained a free-rectangle merge step (`merge_free_rects`, folds adjacent free rectangles back into one after every placement) and a `waste_strategy` param (`"balanced"` default reproduces prior behavior exactly; `"edge"` — see M4 row for what it does and its measured effect). |
 | M3 | PDF layout export (saw) | 🟢 Redesigned + tested | `optimizer/export/pdf.py` went through two full redesigns this project. **Rev 1** (`Updates/update_002.md` → moved to `Business Logic/grain_logic.md`, unrelated to grain — see below) matched `sample_data/NirvanaTec Plus2D Optimization Drawing PDFs/`: landscape board (transposed render axes), colored panels, 2-per-page. **Rev 2, current** (a *second, different* `Updates/update_002.md` — the filename was reused for an unrelated spec; see the "reused filenames" note above) replaces Rev 1 entirely, following `sample_data/Max Cut Optimization Drawings/max_cut.pdf` instead: a left sidebar (material + sheet size, a per-sheet "Cutting List" grouped by `(name, nominal L, nominal W)` with running Symbol numbers via `_cutting_list()`, an "Occurrences ×N" box, a "Grain Direction" arrow box) beside a main area (a "Job Layout" header, a Client/Job/Sheet/Job stats grid, the board diagram). Board draws **portrait** this time (`board.length` vertical) — the *opposite* of Rev 1's landscape, and matching the packer's native axes directly, so no render-axis transform is needed (removed `_render_sheet_area`/`_render_offcut_area` along with it). Per the update's explicit instructions: (1) **occurrence deduplication** — `_deduplicate_layouts()` collapses physically-identical sheets (same board + same placed-part positions) into one printed page with an `×N` badge instead of N near-duplicate pages (real-data result: the 21-sheet saw sample collapses to **9** printed pages, one page alone absorbing 9 duplicate sheets); "Job Sheets"/"Job Panels"/etc. still count the *physical*, un-deduplicated sheet list. (2) **date format** `DD-MMM-YYYY hh:mm:ss` in the footer via `datetime.now().strftime(...)`. (3) **grain-direction arrow**: empty box for `grain="none"` (per the update's literal instruction — the reference itself shows an ambiguous always-on 4-way icon that didn't reliably indicate this, see below); a single vertical double-headed arrow for `grain="length"`, horizontal for `"width"` — **this mapping was NOT derivable from the reference alone** (same material showed different icons across different sheets in the reference, ruling out a simple per-material constant, and MaxCut's own internal packing-axis convention doesn't visibly match ours) and was confirmed directly with the project owner via `AskUserQuestion` rather than guessed, given the real risk (wrong grain direction → scrapped material). (4) **kept colored panels** (palette cycling by placement order, same approach as Rev 1) — the one explicit departure from the reference, which is plain black-and-white. (5) **reverted to 1 layout per page** (Rev 1's 2-per-page doesn't fit this denser layout, per the update). Client Name/Job Reference/Phone/Fax/Cell No/Date Required are left blank (labels only) — no such data exists in this app, and the reference's own sample pages leave them blank too, so this isn't a fabrication gap. "Sheet/Job Cut Length" reuse `OptResult.cuts` (already computed by M2's guillotine cut-list builder); "Job Wastage" is an area-weighted average of each sheet's own utilization (no per-sheet margin data is stored on `Sheet` to compute it more precisely — documented approximation, not a fabrication). Covered by `backend/tests/test_pdf.py` (10 tests, fully rewritten for Rev 2: dedup-page-count, page-text sanity, empty-result, dedup grouping + signature equality, cutting-list grouping/symbol assignment incl. the nominal-vs-rotated-footprint distinction, the confirmed grain-direction mapping, palette-cycling, and a sidebar/footer-overlap geometry regression — see next). **Found and fixed one real bug via visual inspection** (not caught by any test until added after the fact): the Occurrences/Grain Direction sidebar boxes extended down to the page's true bottom margin instead of stopping above the footer strip, so they visually overlapped the footer text — full pages were rendered and eyeballed, not just computed from geometry math, which is what caught it. Fixed via a `_sidebar_bottom_boxes()` helper now covered by a dedicated regression test; verified that test fails against the pre-fix geometry and passes after restoring the fix. Still open from spec §6a: no cut-sequence list/overlay (neither reference PDF shows one). |
 | M4 | Free-nest optimizer (router) | 🟢 Fixed + tested | Same multi-sheet loop and grain-grouping fix as M2. **The naive shelf packer flagged in earlier passes is gone**: prompted by `update_001` comparing our output against the real Nanxing machine's own software on the same job (identical board/margin/spacing — a real efficiency benchmark), found the shelf packer's root cause (once a row wraps, its leftover space is never reconsidered by later, smaller parts) and replaced it with the same class of free-rectangle best-fit engine `guillotine.py` uses (now `optimizer/nanxing_packing.py`, its own independent copy — see M2 row). Real-data result at the time: the sheet holding the most parts in `nesting_machine_data.csv` went from 21 parts at 21.4% utilization to 29 parts at 73.8% — still below the real machine's 78–92%. Covered by `backend/tests/test_nanxing.py` (7 tests incl. a new dominant-sheet-utilization regression guard) + `test_guillotine.py`. Verified the new test has teeth the same way as always: reverted to the old shelf packer, confirmed it fails (21.4% < 55% threshold), restored. **`Updates/update_003.md` (2026-08-13): `waste_strategy` option closes most of that remaining gap.** Prompted by a real screenshot (`Updates/image.png`) of this app's own Nanxing PDF output showing thin wastage slivers scattered between placed drawer parts instead of consolidated at one edge — added a selectable `waste_strategy`: `"balanced"` (default, prior behavior) vs `"edge"` (forces the guillotine split to always cut along the same fixed axis instead of picking whichever leaves the shorter leftover strip, so leftover space keeps accumulating into fewer, larger regions instead of a new sliver on every placement — see `optimizer/saw_packing.py`'s `guillotine_split` docstring for the full reasoning). Verified on the real `nesting_machine_data.csv` job: the busiest sheet went from 28 parts/73.56% utilization (`"balanced"`, re-measured after the M2 merge-step addition — was 29/73.8% before it, an incidental ~0.2pp shift from a scoring tie now resolving differently, not a regression) to **33 parts/78.41%** under `"edge"` — now inside the real machine's 78–92% range instead of below it. Job-wide, the largest single offcut's share of total offcut area rose from ~65% to ~73% (a direct, measured consolidation metric, not just an aggregate utilization number). Re-rendered and visually compared both strategies' PDF page for the same sheet to confirm the *pattern* actually changed, not just the numbers — "balanced" still shows several similar-sized gaps between strips; "edge" shows one larger consolidated gap. Covered by new `backend/tests/test_packing_engines.py` (12 tests: packer-module independence, `merge_free_rects` correctness, `"edge"`'s fixed-axis behavior, guillotine-decomposability preserved under `"edge"` for both machines, and the largest-offcut-fraction consolidation regression guard) — verified that last test and the axis-forcing test both have teeth by temporarily reverting the fix and confirming failure, then restoring. Exposed as a "Waste placement" dropdown in `frontend/src/components/ParamsPanel.tsx` (`tsc -b`/lint/build all clean) for both machine targets, not just Nanxing, since both packers now support it identically. |
-| M5 | FCC XML geometry | 🟢 Rebuilt + tested | `optimizer/export/xml.py` fully rewritten around the real `FccRoot`/`Patterns`/`Pattern`/`Workpieces`/`Workpiece`(+`EdgeGroup`/`Lineament`/`Lineament2`/`FccOutline`/`BenchmarkInfo`)/`OddmentsList` structure (spec §6b + Appendix A). Byte-exact on the empty-job case (Appendix A.8). `MachiningPoint` now uses the exact rule M6 discovered (see below) — **0 mismatches across all 4 non-empty golden files (1039 workpieces)**, not the ~83%/17% Appendix A.3 describes. |
+| M5 | FCC XML geometry | 🟢 Rebuilt + tested | `optimizer/export/xml.py` fully rewritten around the real `FccRoot`/`Patterns`/`Pattern`/`Workpieces`/`Workpiece`(+`EdgeGroup`/`Lineament`/`Lineament2`/`FccOutline`/`BenchmarkInfo`)/`OddmentsList` structure (spec §6b + Appendix A). Byte-exact on the empty-job case (Appendix A.8). `MachiningPoint` now uses the exact rule M6 discovered (see below) — **0 mismatches across all 4 non-empty golden files (1039 workpieces)**, not the ~83%/17% Appendix A.3 describes. **Pass 21 (2026-09-02, see "Last worked"): `Workpiece.Info1`/`Info2` added** — a real physical machine label showed a blank "F.S." (Final Size) field; found via barcode cross-reference against real golden data that `Info1`/`Info2` hold the source CSV's own `Lenght`/`Width` columns exactly (55/55 real parts, no rotation dependency), not something derivable from other XML fields as an earlier pass had assumed. `CutLength`/`CutWidth` (actual cutting geometry) deliberately untouched. Two related discrepancies found but left alone (`Length`/`Width`'s own formula; the importer still reads the old, wrong source) — see "Remaining work" #5. |
 | M6 | FCC XML toolpaths | 🟢 Implemented + tested | `CutInfos.ToolPointList`/`ToolPoint` implemented per Appendix A.5's lead-in-ramp formula, plus two rules the appendix doesn't document, both found by testing against real files: **(1)** when an edge is shorter than `SlopeLen` (70mm), both of that edge's candidate points clamp to the edge midpoint instead of the raw corner-offset formula; **(2)** the `Lineament`/`Lineament2`/`FccOutline` polygon winding — and the `ToolPointList` idx→corner assignment — starts one corner later exactly when `CutWidth > CutLength` **and** the part isn't grain-locked (grain-locked parts never shift, confirmed against 207 grain-directional workpieces, all unrotated). This same signal turned out to fully explain `MachiningPoint`'s "~83%/17%" split from Appendix A.3 (now exact, see M5). `ToolPointList` itself lands at 88.1–96.4% exact match across the 4 golden files — the remaining mismatches look like isolated real-world manual adjustments (e.g. a single corner off by 6.8mm on one otherwise-perfect 55/56-attribute workpiece) rather than a missed rule; Appendix A.5 itself expects this needs machine dry-run refinement, so it's tracked as a documented tolerance (`backend/tests/test_xml_roundtrip.py`'s `MIN_TOOL_POINT_LIST_MATCH_RATE`), not chased to 100%. `ToolPoint` (which of the 4 lead-in points the cut starts at) has no discovered rule — defaults to `"0"` per Appendix A.5's own stated fallback. Point-winding and `MachiningPoint` comparisons in the round-trip test were tightened from tolerant to strict now that the real rules are known, and confirmed to have teeth (broke the shift logic, reran, 4/4 golden-file tests failed on the exact-match `MachiningPoint` assertion; restored, all green). |
 | M7 | Frontend integration | 🟢 Built + browser-verified | New `frontend/` (Vite + React + TypeScript), sibling to `backend/`. Wizard flow: CSV drag-drop → column-mapping (client-side schema guess in `csvSchemas.ts` for immediate feedback; actual parsing delegated to the already-tested `/api/parse`, not reimplemented in TS) → machine selector + params panel (margins, stock boards derived from parts, kerf/saw or tool Ø+spacing/nanxing) → per-sheet SVG preview (`SheetPreview.tsx`) + summary (`Summary.tsx`, with a client-computed unplaced-reason since the backend doesn't attach one) → PDF/XML download via the existing `/api/export/*` endpoints. Dev wiring is a Vite `server.proxy` (`/api` → `127.0.0.1:8000`), zero backend changes. `tsc -b`/`npm run build`/`npm run lint` all clean. **Actually driven in a headless browser** (Playwright, no project `run` skill existed yet so used the generic browser-driven fallback): uploaded both real sample CSVs — correct schema auto-detection for both, part counts matched exactly (50, 55); ran optimize for both Panel Saw and Nanxing — 21 sheets / 0 unplaced / 46.8% avg utilization each, matching Phase A's known-good numbers exactly; 21 SVG sheet previews rendered with 50 total placed-part rects (matches part count); downloaded a real 21-page PDF and a real `FccRoot` XML; a deliberately malformed CSV correctly surfaced the backend's exact validation error in the UI instead of crashing. Zero console/page/network errors throughout. **Scope decision:** the per-sheet preview does *not* share a renderer with the PDF (spec §8's aspiration) — that would mean redesigning M3's still-skeletal `reportlab` renderer, a separate concern; downloads call the existing `/export/pdf`/`/export/xml` endpoints as-is. **Visual polish pass** (presentation-only, no logic changes): real design tokens + dark-mode support in `index.css`, a `Stepper.tsx` progress indicator, card-based layout, stat cards, selectable machine-option cards, and a responsive sheet-preview grid. Found and fixed one real bug while at it — the Vite scaffold's leftover `#root { text-align: center }` was inheriting into every form label/paragraph in the app. Reverified in a headless browser (screenshots at each wizard step) with the same real CSV — same known-good numbers (21 sheets, 0 unplaced), zero console errors, confirmed `text-align: left` via computed style. **`Updates/update_005.md` (2026-08-14): added a 4th Summary stat, "Panels/Parts cut"** (`sum` of `sheet.placed.length` across all sheets) alongside Sheets/Avg. utilization/Unplaced parts — `.stat-row`'s CSS grid widened from a hardcoded 3 to 4 columns to fit it evenly. Verified in a headless browser against a real sample CSV: shows `50`, matching that file's known part count exactly; zero console errors; screenshot confirmed the 4 cards lay out cleanly with no overlap. |
 | M8 | Offcut/oddment reuse | ⬜ Not started | `Sheet.offcuts` are computed as leftover free rectangles per run but never persisted or fed back as input stock for a later job. |
@@ -81,8 +81,11 @@ successor pass below), `test_parser.py`, `test_guillotine.py`,
 `test_nanxing.py`, `test_xml_roundtrip.py` (now parametrized across all 4 non-empty golden
 files, not just one), `test_pdf.py`, `test_packing_engines.py`, `test_storage.py`,
 `test_api_persistence.py`, `test_xml_export_coordinates.py`, `test_import_xml.py`,
-`test_api_import.py`, `test_placement.py`, `test_api_optimize.py` — **179 tests**, all green from
-a clean `pip install -e ".[dev]"`.
+`test_api_import.py`, `test_placement.py`, `test_api_optimize.py` — **186 tests** (re-counted
+directly via `pytest --collect-only` during pass 21, +2 more in pass 22, see "Last worked" — the
+figure recorded here had drifted a few sessions stale before pass 21), all green from a clean
+`pip install -e ".[dev]"` (once the stale `sample_data` XML path from "Remaining work" #4 is
+worked around).
 `test_api_persistence.py` is the first test file to exercise `api.py` directly over real HTTP
 (via FastAPI's `TestClient`, new `httpx` dev dep) — scoped just to the new `/stock-boards` and
 `/settings` endpoints; `/parse`, `/optimize`, `/export/pdf`, `/export/xml` still aren't covered
@@ -121,10 +124,10 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-09-02 — nineteen passes across six sessions (this session opened without
-  the direct conversation history for passes 9–18 below — resumed entirely from this file, the
-  auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is exactly the
-  point of keeping this file current). (1) Applied
+- **Last worked:** 2026-09-03 — twenty-four passes across six sessions (this session opened
+  without the direct conversation history for passes 9–18 below — resumed entirely from this
+  file, the auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is
+  exactly the point of keeping this file current). (1) Applied
   `Business Logic/grain_logic.md` (raw CSV `Grain` codes are `0`/`1`/`2`, not just `0`/`x`/`y`;
   `1`/`2` were previously unmapped and silently treated as ungrained/rotatable). Fixed in
   `GRAIN_MAP` (`backend/optimizer/parser.py`), see M1 row. (2) Redesigned M3's PDF export to
@@ -502,6 +505,131 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   with computed `text-overflow: clip` (not `ellipsis`) and `scrollWidth === clientWidth`
   (nothing clipped), screenshot confirms bold full names on their own line above each bar,
   zero console errors. `tsc -b`/lint/build all clean. Purely CSS, no component/backend change.
+  (21) A real physical workpiece label (two photos: `RE_75633_PINE_NUT_2MM` edge-band header,
+  `Drawer_Front_With_G_profile` parts) showed `C.S.` (Cutting Size, `CutLength`/`CutWidth`)
+  printing correctly but `F.S.` (Final Size, for the edge-banding team downstream of cutting —
+  not used by the machine's own cutting) printing as a bare `x` with nothing on either side.
+  Investigated by cross-referencing a real CSV (`nesting_machine_data.csv`) against its real
+  machine-cut golden XML by shared barcode (all 55 matched) rather than guessing: confirmed the
+  machine's `Workpiece.Info1`/`Info2` attributes — present on every real golden workpiece, but
+  flagged since M5/M6 as "no consistent relationship to Length/Width/CutLength/CutWidth found,
+  not worth fabricating" — actually hold the *source CSV's own* `Lenght`/`Width` columns
+  exactly (`part.finishedLength`/`finishedWidth`), 55/55 exact, no rotation dependency; this
+  app's exporter never emitted them at all, which is exactly why the label came up blank. Fixed
+  by adding `Info1`/`Info2` to `_workpiece_element` (`optimizer/export/xml.py`), sourced from
+  `finishedLength`/`finishedWidth` — confirmed the project owner wanted cutting untouched
+  first (`AskUserQuestion` + direct discussion), so `CutLength`/`CutWidth` (which drive the
+  actual toolpath and were already correct) were not touched. **Found, not fixed, along the
+  way:** this app's existing `Length`/`Width` attributes (also sourced from
+  `finishedLength`/`finishedWidth`) don't match real golden data either — real `Length`/`Width`
+  is `CutLength + 6.0`/`CutWidth + 6.0` exactly across all 1039 real workpieces checked, a
+  fixed constant unrelated to edge-band type. Left alone since nothing reported depends on it
+  and the project owner asked to scope this to just the F.S. fix — flagged in "Remaining work"
+  below. Also left `optimizer/import_xml.py`'s importer alone (it still reads
+  `finishedLength`/`finishedWidth` from the XML's `Length`/`Width` on the way in, not the more
+  correct `Info1`/`Info2`) since fixing it isn't needed for the reported issue and interacts
+  with the golden-file round-trip test's existing `Length`/`Width` comparison — also flagged
+  below rather than touched unprompted. New regression test
+  `test_real_job_info1_info2_match_golden_finished_size` (`test_xml_export_coordinates.py`,
+  +1 test) runs the real sample CSV through the actual parser → Nanxing packer → exporter path
+  and asserts the exported `Info1`/`Info2` match the real golden file's own values for all 55
+  shared barcodes, not just a synthetic case. Verified against real data twice: once via a
+  standalone script (confirming the fix before writing the test) and once via the new pytest
+  test itself, both 55/55 exact. Full suite: 184 passed, 0 failures (temporarily verified via a
+  local, untracked symlink working around the still-unfixed stale `sample_data` path noted in
+  "Remaining work" #4 below — removed after verifying, not committed). No frontend changes.
+  (22) Real NaccNesting screenshots (same session as pass 21) showed the machine's own
+  printed dimension label on-screen was sometimes visibly mismatched from the actual rendered
+  rectangle — e.g. a real reported part (`26Y118T1F1A1_1246`, "Adjustable Shelf",
+  `CutLength=1013.8`, `CutWidth=528.8`, `grain="none"`) showed `1013.8` printed along what was
+  visually the *shorter* edge of the drawn rectangle. Root-caused through direct discussion,
+  not guesswork: `nanxing_packing.py`'s best-short-side-fit placement had zero preference for
+  which physical board axis (length vs width) carried a part's `CutLength` — it only minimizes
+  leftover slack, so it happily places `CutLength` along the board's *width* axis whenever that
+  packs tighter. Confirmed directly against real code+real CSV data for the exact reported
+  part: on an empty board it chose exactly that "sideways" placement. The project owner's own
+  diagnosis (their words: "the machine always sets the label along the length") supplied the
+  missing piece — NaccNesting's label rendering apparently always assumes `CutLength` sits
+  along the horizontal/length-axis position regardless of a part's actual `RotateAngle`
+  (our own exported geometry + `RotateAngle` stay internally self-consistent either way, already
+  verified byte-for-byte in earlier passes — this is a mismatch between our packer's placement
+  *choice* and the machine's *label assumption*, not a geometry bug). Fixed by giving
+  `place_parts_on_board` a **preference** (not a hard constraint) for whichever orientation
+  keeps `CutLength` on the local-y (board.length-derived) axis, tried first across all free
+  rectangles; only falls back to the other orientation when the preferred one fits nowhere — so
+  nothing that used to fit can become unplaced. Grain-locked parts already satisfied this by
+  construction (`can_rotate()` is `False` for them, so there's only ever one orientation to try,
+  and it already keeps their grain-mandated axis correct — no change needed there). Scoped to
+  `nanxing_packing.py` only, confirmed with the project owner first — `saw_packing.py`'s
+  identical characteristic was deliberately left alone since the panel saw's PDF labels are
+  rendered by this app's own `_nominal_dims()`, not a machine-side assumption, so it has no
+  equivalent symptom. **Measured the efficiency impact directly rather than assuming**, per the
+  project owner's explicit question ("will it make the optimization worse?"): ran before/after
+  comparisons on 3 real jobs (the reported 11-part material group, the 55-part
+  `nesting_machine_data.csv` sample, and the 656-part `26Y117T1F1B1(BEDROOM 3-4)` reported job)
+  — identical sheet counts and identical combined utilization in all three, before and after;
+  the preference only changed *which* sheet absorbed the slack on the 11-part case, not the
+  total. Two new regression tests in `test_packing_engines.py` (186 total, up from 184):
+  `test_nanxing_prefers_cutlength_on_length_axis_when_both_orientations_fit` (the exact real
+  reported part, asserts the new placement) and
+  `test_nanxing_preference_falls_back_when_preferred_orientation_does_not_fit` (a precisely
+  constructed board/part combination — verified against the real code before writing the
+  assertion, not guessed — where the preferred orientation genuinely doesn't fit and the
+  fallback must engage, proving the "never unplace a previously-placeable part" guarantee
+  holds). Full suite: 186 passed (temporarily verified via the same untracked symlink as pass
+  21, removed after). No frontend changes, no PDF/saw changes. Both this fix and pass 21's F.S.
+  fix are also logged in `To DOs.md`'s Bug Fixes section per the project owner's preference for
+  that file as the actionable list (see that file directly for the terse version).
+  (23) The project owner shared real screenshots and, critically, two real XML files for the
+  *exact same job* — one generated by this app, one by Fin China's own optimizer, plus the
+  source CSV — dropped into `results/26Y118_data/`. Investigated with real tooling
+  (`grep`/`python3 -re`, not eyeballing two ~8,000-line files) rather than trying to manually
+  diff them, after an earlier attempt at manual comparison correctly flagged its own unreliability
+  and asked the project owner for real files instead of guessing. Extracted the exact same
+  workpiece (`26Y118T1F1A1_1198`, `CutLength=720.4`/`CutWidth=318.4`, grain-free) from both real
+  files with a small Python/regex script and compared `RotateAngle`/`MachiningPoint`/the
+  `Lineament` polygon's actual X/Y span — this is what found pass 22's fix to be an incomplete
+  mitigation, not the root cause (see item 1 in "Remaining work" above for the full 3-part
+  evidence trail: geometry mismatch, `MachiningPoint` mismatch, and why the one previously-
+  correct part only worked by two backwards conventions cancelling out). Also regenerated this
+  exact real job through today's actual code (post pass-22-fix) and confirmed the same part
+  still comes out wrong — proving pass 22's preference-ordering fix, while directionally
+  correct and worth keeping, doesn't fully close the gap on its own. The project owner then
+  asked directly whether this was the same thing as the "allow rotation" toggle, and reported
+  toggling it off produced the same wrong result — which turned out to be the key diagnostic:
+  with rotation off, the packer is forced into its one available orientation, which was already
+  the backwards one, so there was never a second orientation for it to fall back to. This
+  confirmed the real fix has to change what "unrotated" *means* for grain-free parts (in
+  `_footprint()`), not just which orientation gets tried first. Proposed the concrete fix
+  (`natural_swap = part.grain != "width"` instead of `part.grain == "length"`) and discussed it,
+  but the project owner asked to log it rather than implement immediately — added as item 1 in
+  "Remaining work" (max priority, set directly by the project owner) and in `To DOs.md`'s Bug
+  Fixes section, not yet implemented. No code changed this pass — investigation and
+  documentation only.
+  (24) Asked directly to implement pass 23's max-priority fix ("Ok, implement it.") — see item 1
+  in "Remaining work" above for the full writeup: `natural_swap = part.grain == "length"` →
+  `natural_swap = part.grain != "width"` in `nanxing_packing.py`'s `_footprint()`. Verified
+  against the same two real `results/26Y118_data/` parts pass 23 used: part `1246` now matches
+  Fin China byte-for-byte (`RotateAngle`/`MachiningPoint`, not just geometry); part `1198` still
+  doesn't, but this time diagnosed rather than left unexplained — a temporary debug trace
+  (added, checked, fully reverted before committing anything) confirmed the sheet it lands on
+  simply has no free rectangle tall enough for the corrected orientation (needs 726.5mm, best
+  available is 666.5mm), so pass 22's existing preference logic correctly falls back rather than
+  leaving it unplaced — exactly the "preference, not a hard constraint" behavior that was always
+  documented, now confirmed with a concrete real trace instead of assumed. Raised, not resolved,
+  a genuine open question this surfaced: whether that preference should become a hard constraint
+  to guarantee 100% label-matching at some efficiency cost — left for the project owner to
+  decide (see item 1). Updated the two pass-22 tests in `test_packing_engines.py` that assumed
+  the old (backwards) convention, plus split the old `test_footprint_none_grain_unaffected_by_
+  the_fix` (which had been parametrized across both packers) into a saw-specific test (unchanged
+  assertions — confirmed `saw_packing.py` is genuinely unaffected, not just untouched) and a new
+  nanxing-specific test with the corrected assertions. Full suite: 186 passed, 0 regressions
+  (verified via the same untracked-symlink workaround as passes 21–23 for item 4 below, removed
+  after). Re-measured efficiency on the same 3 real jobs pass 22 used, this time via `git stash`
+  of just the one changed line to get a true before/after on identical code otherwise — sheet
+  counts and combined utilization percentages came out identical before and after in all three,
+  confirming this fix only relabels which `rotated` value is chosen for placements that were
+  already happening, it doesn't change what fits. No frontend changes.
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
@@ -519,7 +647,9 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   → `uvicorn api:app --reload --host 127.0.0.1 --port 8000`. `backend/.venv` has the `dev`
   extra installed (`pip install -e ".[dev]"`, now including `pypdf` for PDF-export test
   assertions and `httpx` for FastAPI `TestClient` HTTP tests) — `pytest -q` from `backend/` runs
-  179 tests, all green. New runtime dependency: a SQLite file at `backend/nesting_pro.db`
+  186 tests, all green (once the stale `sample_data` XML path from "Remaining work" #4 is
+  worked around — see "Last worked" pass 21). New runtime dependency: a SQLite file at
+  `backend/nesting_pro.db`
   (gitignored, auto-created on first request via `storage.get_connection()` — no manual setup
   step, but a fresh clone's first `/stock-boards` or `/settings` call creates it).
 - **Frontend entry point:** `frontend/` (Vite + React + TypeScript), `npm run dev` serves on
@@ -615,10 +745,52 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
 
 ## Remaining work — likely priority order
 
-1. **~~Reload the M11-fixed XML into the real NaccNesting software~~ — done, and superseded by
+1. **MAX PRIORITY (set directly by the project owner, 2026-09-02, pass 23).** Grain-free
+   (`grain="none"`) parts' "unrotated" pose was backwards relative to the real Fin China
+   machine's own convention — **fixed in pass 24** (2026-09-03): `nanxing_packing.py`'s
+   `_footprint()` now uses `natural_swap = part.grain != "width"` (was `== "length"`), so
+   grain-free parts share grain="length"'s (correct) natural-pose baseline instead of
+   grain="width"'s. **Verified two ways against the exact real parts in `results/26Y118_data/`**:
+   part `26Y118T1F1A1_1246` now matches Fin China's `RotateAngle`/`MachiningPoint`
+   byte-for-byte (`RotateAngle` absent/`MachiningPoint="1"` both sides) — previously it only
+   *looked* right by geometric coincidence (right axis span, wrong internal `rotated` meaning).
+   Part `26Y118T1F1A1_1198` — the specific part the project owner asked about — **still doesn't
+   match Fin China after the fix**, but this was traced to its actual cause rather than left
+   unexplained: on the sheet it lands on, the free rectangle available at that point in the
+   packing sequence is 1205×666.5mm, and the corrected/preferred orientation needs 726.5mm on
+   the short axis — about 60mm more than is there. Confirmed via a temporary debug trace of
+   `place_parts_on_board`'s per-part rectangle scoring (added, checked, then fully reverted —
+   `git diff` after confirms only the `_footprint` line changed). This is pass 22's own
+   documented "preference, not a hard constraint" behavior working exactly as designed, not a
+   bug in the fix. **Open follow-up, not yet decided:** should the preference become a hard
+   constraint (only ever try the Fin-China-matching orientation, never falling back) to
+   guarantee every part's on-screen label matches, at the cost of possibly more sheets or
+   genuinely unplaced parts on tight jobs? Left as a preference for now, unchanged from how
+   pass 22 shipped it — needs the project owner's steer before changing that tradeoff. Updated
+   the pass-22 tests that assumed the old (backwards) convention in `test_packing_engines.py`
+   (`test_footprint_none_grain_unaffected_by_the_fix` split into a saw-specific test, unchanged,
+   and a new nanxing-specific test asserting the corrected swap;
+   `test_nanxing_prefers_cutlength_on_length_axis_when_both_orientations_fit`'s
+   `placed.rotated` flipped `True`→`False`;
+   `test_nanxing_preference_falls_back_when_preferred_orientation_does_not_fit`'s flipped
+   `False`→`True` — the two tests' pre-fix/post-fix roles literally swapped, since the "which
+   orientation is preferred" flip means the part that used to demonstrate the preferred case now
+   demonstrates the fallback case and vice versa). Full suite: 186 passed, no regressions
+   (confirmed via the same untracked-symlink workaround as passes 21/22 for the still-open item
+   4 below, removed after). Re-measured efficiency on all 3 real jobs used in pass 22
+   (`26Y118_data`'s 138-part job, `nesting_machine_data.csv`, `26Y117T1F1B1(BEDROOM 3-4)`'s 656
+   parts) by diffing against a `git stash` of just this one file's change — identical sheet
+   counts and combined utilization before/after in all three; this fix only changes *which*
+   `rotated` value is chosen for a part whose fallback orientation was already the one being
+   used, not whether anything fits. `saw_packing.py` deliberately untouched (unaffected —
+   confirmed the parametrized-across-both-modules test only failed for `nanxing_packing`, not
+   `saw_packing`, matching the intentional scoping from pass 22). Logged in `To DOs.md`'s Bug
+   Fixes section too, per the project owner's preference for that file as the terse actionable
+   list.
+2. **~~Reload the M11-fixed XML into the real NaccNesting software~~ — done, and superseded by
    an actual physical dry-run cut** (see item 2 and `Issues/issues_005.md`). The layout loaded
    and looked correct; a small demo job was then actually cut.
-2. **Physical dry-run cut happened (`Issues/issues_005.md`) — reported a real 6–7mm shortfall on
+3. **Physical dry-run cut happened (`Issues/issues_005.md`) — reported a real 6–7mm shortfall on
    one dimension (width), the other (length) exact.** Investigated thoroughly: this app's
    exported geometry for the exact reported scenario was verified byte-for-byte against a real
    golden machine-cut workpiece with identical characteristics, and found correct — no bug in
@@ -634,14 +806,60 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
    new corner) that points at the table/machine; if it follows the *file* regardless of corner,
    that reopens the software investigation. `ToolPoint`'s rule is still unknown (defaults to `0`)
    and remains unconfirmed either way. Not something a coding session can do unattended.
-3. **Fix stale golden-XML test paths (quick, actionable right now, unlike items 1–2).**
+4. **Bug: physical label placeholder position is inconsistent/"off-center" on nesting-pro
+   exports — partially fixed in pass 22, real root cause found in pass 23, tracked as item 1
+   above (max priority, set by the project owner).** Reported directly (2026-09-02) via real
+   NaccNesting screenshots — "Fin China's own optimization tool places it properly; nesting-
+   pro's placement is sometimes off-center." My first hypothesis (`ToolPoint`, always hardcoded
+   to `"0"` in this app's export — checked real Fin-China data and confirmed it genuinely varies
+   0/1/2/3 there) turned out to be a red herring for *this* symptom: the project owner's own
+   diagnosis was sharper — "the machine always sets the label along the length," meaning
+   NaccNesting's printed dimension text apparently always assumes `CutLength` sits horizontally
+   (the board's length axis) regardless of a part's actual `RotateAngle`. Combined with a real
+   gap in `nanxing_packing.py` (its best-fit placement had zero preference for which board axis
+   carried `CutLength`, confirmed directly against the exact reported part), pass 22 shipped a
+   placement *preference* (not a hard rule — falls back safely) for keeping `CutLength` on the
+   board's length axis when both orientations fit, measuring zero efficiency impact on 3 real
+   jobs. **That fix turned out to be a real but incomplete mitigation, not the root cause**: pass
+   23's direct real-file comparison (`results/26Y118_data/`, see item 1) found this app's own
+   notion of "unrotated" for grain-free parts is backwards relative to Fin China's own
+   convention, which the preference-ordering fix can't fully correct since it's still just a
+   preference that falls back when the "corrected" orientation doesn't fit the current free
+   space — see item 1 for the actual fix. `ToolPoint`'s own rule genuinely remains unknown
+   (still hardcoded to `"0"`, see item 3 above) — it was never the explanation for this bug.
+5. **Fix stale golden-XML test paths (quick, actionable right now, unlike items 1–4).**
    `sample_data/`'s XML folder was renamed (`XML Data for Nanxing Nesting Machine/` → `XML Data
    from Fin China/`) since the paths were last updated in `conftest.py`/`test_xml_roundtrip.py` —
    currently causes 32 errors + 4 failures in the backend suite. Found during pass 19 (see "Last
    worked"), deliberately not fixed then since it was unrelated to that pass's request — but
    worth confirming the new folder name is the intended final one (not itself a temporary/WIP
    rename) before updating the test paths to point at it.
-4. **Share a renderer between `SheetPreview.tsx` and the PDF:** still two independent
+6. **Two related, quick-to-fix discrepancies found during pass 21's F.S./`Info1`/`Info2` fix
+   (see "Last worked"), deliberately left alone since they weren't part of what was asked and
+   the project owner explicitly scoped that pass to just the label fix:**
+   - `optimizer/export/xml.py`'s `Workpiece.Length`/`Width` attributes are set from
+     `part.finishedLength`/`finishedWidth` (the same source `Info1`/`Info2` now correctly use),
+     but real golden data's actual `Length`/`Width` values are `CutLength + 6.0`/`CutWidth +
+     6.0` exactly — confirmed across all 1039 real workpieces in `sample_data`, zero
+     exceptions, no dependency on edge-band type. Nothing currently reads `Length`/`Width` from
+     this app's own export (cutting uses `CutLength`/`CutWidth`; F.S. now correctly uses
+     `Info1`/`Info2`), so this is latent, not visibly broken — but worth fixing to match the
+     real format if anything ever does start reading it.
+   - `optimizer/import_xml.py`'s `parse_fcc_xml` (used by both the real "import an existing
+     Nanxing XML" feature and `tests/fcc_golden.py`'s round-trip fixture) still sets
+     `finishedLength`/`finishedWidth` from the imported XML's `Length`/`Width` attributes, not
+     `Info1`/`Info2` — meaning an imported real machine file currently gets the *wrong* value
+     into the field that means "finished/F.S. size," the mirror image of the export bug pass 21
+     fixed. Not fixed this pass because it interacts with `test_xml_roundtrip.py`'s existing
+     `Length`/`Width` comparison (see `compare_workpiece`): fixing the importer without also
+     fixing the *first* bullet's `Length`/`Width` export formula would break that test's
+     round-trip fidelity check for a well-understood reason (the two sides currently agree only
+     because they share the same wrong assumption — the same structural blind spot that let
+     M11 go undetected for a full milestone, see the note right after the M11 row). The clean
+     fix is almost certainly both bullets together, plus extending `compare_workpiece` to check
+     `Info1`/`Info2` too — not attempted here since it wasn't requested and touches the
+     project's core validation asset.
+7. **Share a renderer between `SheetPreview.tsx` and the PDF:** still two independent
    implementations (M7's own deferred aspiration) — they currently happen to agree on board
    orientation (both portrait, both using the packer's native axes) after M3 Rev 2 switched the
    PDF back to portrait, but that's incidental, not enforced; a future PDF-only orientation
@@ -650,7 +868,7 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
    nor Rev 2) shows one; the `cuts` data still isn't wired into `export/pdf.py`, but nothing
    currently calls for it to be (M9-era passes did add a cut-line *overlay*, see M2/M3-adjacent
    passes 9–11 in "Last worked" — this item is specifically about a shared renderer, still open).
-5. **Grain-direction arrow, real-world confirmation:** the length↔vertical/width↔horizontal
+8. **Grain-direction arrow, real-world confirmation:** the length↔vertical/width↔horizontal
    mapping in M3 Rev 2 was confirmed with the project owner (not derived from the MaxCut
    reference, which was ambiguous — see M3 row), but still hasn't been checked against an
    actual grain-locked job on real material. Lower risk now than when this was first confirmed:
@@ -658,21 +876,21 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
    does run along the board's *length* axis, matching this mapping exactly — still worth a
    sanity check if/when a grain-locked CSV goes to real material, but no longer just a guess
    backed only by the project owner's say-so.
-6. **Frontend test suite:** `frontend/` has none yet — every UI pass through pass 19 was verified
+9. **Frontend test suite:** `frontend/` has none yet — every UI pass through pass 19 was verified
    via type-check, build, lint, and a real headless-browser (Playwright) pass, not an automated
    suite (Vitest/RTL or similar).
-7. **M10 grain-axis fix, real-world confirmation:** verified against real golden Nanxing XML
+10. **M10 grain-axis fix, real-world confirmation:** verified against real golden Nanxing XML
    data (16 matching `Grain="L"` workpieces, including the exact reported part) and against
    full geometry invariants on the reported job — the strongest evidence this project has for a
    grain-placement rule without an actual cut. Still worth a physical dry-run before fully
    trusting it, same caveat as everything else grain-related (see M6 row's own dry-run gap).
-8. **`waste_strategy="edge"`, real-world confirmation:** verified geometrically (guillotine-
+11. **`waste_strategy="edge"`, real-world confirmation:** verified geometrically (guillotine-
    decomposable, no overlaps, nothing dropped, both machines) and against real CSV job numbers
    (measured utilization + offcut-consolidation improvement — see M4 row), plus visually via a
    rendered PDF. Not yet confirmed on an actual cut sheet that the consolidated wastage is where
    it visually appears to be and is actually more usable as offcut stock in practice.
-9. **M8 offcut reuse:** larger oddments become returnable stock (see Appendix A.6).
-10. **M9, deferred scope:** `update_004.md`'s login/auth, tenant/company modeling, per-machine
+12. **M8 offcut reuse:** larger oddments become returnable stock (see Appendix A.6).
+13. **M9, deferred scope:** `update_004.md`'s login/auth, tenant/company modeling, per-machine
     "available optimizations" config, and CSV-schema-template renaming (Nanxing Nesting →
     "Template 1", Panel Saw → "Template 2" — mapping already confirmed with the project owner,
     just not implemented yet) were all explicitly scoped out of the first persistence pass (see

@@ -29,9 +29,15 @@ PRO_OFFSET = 3.0
 #     golden data; a machine dry-run is needed before trusting a non-default choice.
 #   - Workpiece.IsIntersectsWith — observed on <2% of real workpieces with no documented
 #     trigger condition.
-#   - Workpiece.Info1 / Info2 — present on every real workpiece but their relationship to
-#     any other field (Length/Width/CutLength/CutWidth) doesn't hold consistently across
-#     samples; not worth fabricating.
+#
+# Workpiece.Info1/Info2 WERE on this list (their relationship to Length/Width/CutLength/
+# CutWidth didn't hold consistently) until a real physical workpiece label (photographed and
+# reported directly, 2026-09-02) showed a blank "F.S." (Final Size) field — re-investigated by
+# cross-referencing Info1/Info2 directly
+# against a real CSV's own Lenght/Width columns instead of against other XML fields, which
+# turned out to be the actual relationship: exact match, 55/55 real barcodes, no rotation
+# dependency. See _workpiece_element's own comment for the fix and what's still deliberately
+# left alone (Length/Width don't match real data either, but nothing depends on them yet).
 
 
 def fmt_num(value: float) -> str:
@@ -193,6 +199,17 @@ def _workpiece_element(part: Part, placed: PlacedPart, workpiece_id: int, cuttin
         "EBW1": part.edges.get("w1", ""),
         "EBW2": part.edges.get("w2", ""),
         "RotateAngle": "90" if rotated else "0",
+        # Real physical workpiece label (photographed and reported directly, 2026-09-02): the
+        # machine's own printed label has a "F.S." (Final Size) field for the edge-banding
+        # team — verified against real golden data (cross-
+        # referencing all 55 shared barcodes between a real CSV and its real machine-cut XML)
+        # that Info1/Info2, not Length/Width, hold the CSV's own Lenght/Width columns exactly
+        # (no rotation dependency, 55/55 exact matches). Length/Width instead carry something
+        # unrelated to F.S. (CutLength/CutWidth + a fixed 6mm, confirmed across all 1039 real
+        # workpieces) — deliberately left alone here since cutting is already correct and
+        # nothing reported relies on it; only Info1/Info2 were missing and needed for F.S.
+        "Info1": fmt_num(part.finishedLength),
+        "Info2": fmt_num(part.finishedWidth),
     }
     tool_points = _tool_points(minx, miny, maxx, maxy, shifted)
     lineament = _El(

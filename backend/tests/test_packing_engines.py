@@ -137,11 +137,25 @@ def test_footprint_width_grain_natural_pose_unchanged(mod):
     assert (pw, ph) == (1323.4, 556.4)  # cutLength on local x, cutWidth on local y — unchanged
 
 
-@pytest.mark.parametrize("mod", MODULES)
-def test_footprint_none_grain_unaffected_by_the_fix(mod):
+def test_footprint_none_grain_unaffected_on_saw():
+    # saw_packing.py's grain="none" natural-pose convention is deliberately untouched by the
+    # nanxing-only fix below — the panel saw's PDF labels are rendered by this app's own
+    # _nominal_dims(), not a machine-side assumption, so it has no equivalent symptom to fix
+    # (see CLAUDE.md pass 22/23-24).
     part = _part(cutLength=1323.4, cutWidth=556.4, grain="none")
-    assert mod._footprint(part, rotated=False) == (1323.4, 556.4)
-    assert mod._footprint(part, rotated=True) == (556.4, 1323.4)
+    assert saw_packing._footprint(part, rotated=False) == (1323.4, 556.4)
+    assert saw_packing._footprint(part, rotated=True) == (556.4, 1323.4)
+
+
+def test_footprint_none_grain_now_matches_length_grain_convention_on_nanxing():
+    # Real production bug (CLAUDE.md pass 23/24, results/26Y118_data/): confirmed directly
+    # against two real machine-cut XML exports of the *same* job (one from this app, one from
+    # Fin China's own optimizer) that a grain="none" part's natural (rotated=False) pose must
+    # run cutLength along the board's length axis, exactly like grain="length" — not grain=
+    # "width"'s convention, which the old natural_swap baseline incorrectly shared.
+    part = _part(cutLength=1323.4, cutWidth=556.4, grain="none")
+    assert nanxing_packing._footprint(part, rotated=False) == (556.4, 1323.4)
+    assert nanxing_packing._footprint(part, rotated=True) == (1323.4, 556.4)
 
 
 def test_length_grain_part_too_wide_for_board_width_now_places_on_saw():
@@ -178,3 +192,48 @@ def test_length_grain_part_still_rejected_if_it_exceeds_both_axes():
     margin = Margin(top=0, right=10, bottom=10, left=5)
     result = saw_optimize([part], stock, margin, kerf=4.0, allow_rotation=True)
     assert len(result.unplaced) == 1
+
+
+# Reported directly (2026-09-02): real NaccNesting screenshots showed the machine's own
+# on-screen dimension label printed next to the wrong (visually shorter) edge for a grain="none"
+# part placed with CutLength running along the board's *width* axis — traced to the machine's
+# label rendering apparently always assuming CutLength is horizontal (the board's length axis),
+# regardless of a part's actual placement. Since we can't change NaccNesting's own rendering,
+# nanxing_packing.py's place_parts_on_board now prefers whichever orientation keeps CutLength on
+# the local-y (board.length-derived) axis when both orientations fit — matching that assumption
+# — falling back to the tighter-packing orientation only when the preferred one fits nowhere.
+# saw_packing.py is deliberately untouched: the panel saw's own PDF labels are computed by our
+# own code (_nominal_dims()), not a machine-side assumption, so this has no equivalent there.
+def test_nanxing_prefers_cutlength_on_length_axis_when_both_orientations_fit():
+    # The exact real reported part: WorkpieceId 26Y118T1F1A1_1246, "Adjustable Shelf",
+    # CutLength=1013.8 > CutWidth=528.8, grain="none". On an empty board both orientations fit
+    # easily. Under the corrected natural_swap convention (CLAUDE.md pass 23/24), the *natural*,
+    # unrotated pose is now the one that keeps CutLength on the board's length axis — matching
+    # Fin China's own real machine-cut export of this exact part (RotateAngle absent i.e. "0",
+    # MachiningPoint="1") byte-for-byte, not just geometrically.
+    part = _part(cutLength=1013.8, cutWidth=528.8, grain="none", id="26Y118T1F1A1_1246")
+    stock = [StockBoard(material="MAT", length=2440, width=1220, thickness=18.0, grain="none")]
+    margin = Margin(top=10, right=10, bottom=10, left=10)
+    result = nanxing_optimize([part], stock, margin, spacing=6.0)
+    assert result.unplaced == []
+    placed = result.sheets[0].placed[0]
+    assert placed.rotated is False  # natural pose, matching Fin China's RotateAngle="0"
+    assert (placed.w, placed.h) == (528.8, 1013.8)  # cutLength (h) on local y / length axis
+
+
+def test_nanxing_preference_falls_back_when_preferred_orientation_does_not_fit():
+    # Precisely constructed discriminating case (board 2440x1220, margin 10 all round, so
+    # usable width=1200/usable length=2420): under the corrected natural_swap convention, the
+    # preferred (natural, rotated=False) pose needs local x = cutWidth = 1250 + gap, which does
+    # NOT fit the 1200mm usable width — but the flipped (rotated=True) orientation (cutLength=900
+    # on local x, cutWidth=1250 on local y) fits fine (900+gap <= 1200, 1250+gap <= 2420). The
+    # part must still place — via the fallback — not end up unplaced just because its preferred
+    # orientation doesn't fit.
+    part = _part(cutLength=900.0, cutWidth=1250.0, grain="none", id="X")
+    stock = [StockBoard(material="MAT", length=2440, width=1220, thickness=18.0, grain="none")]
+    margin = Margin(top=10, right=10, bottom=10, left=10)
+    result = nanxing_optimize([part], stock, margin, spacing=6.0)
+    assert result.unplaced == []
+    placed = result.sheets[0].placed[0]
+    assert placed.rotated is True  # fell back away from the (unfitting) natural pose
+    assert (placed.w, placed.h) == (900.0, 1250.0)  # cutWidth (h) on the length axis

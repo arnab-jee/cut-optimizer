@@ -107,9 +107,9 @@ def merge_free_rects(rects: list[Rectangle]) -> list[Rectangle]:
 
 def _footprint(part: Part, rotated: bool) -> tuple[float, float]:
     """Returns (pw, ph), the placement footprint's extent along the board's local x/y axes.
-    `rotated` means the part has been physically turned 90 degrees from its own natural,
-    grain-mandated pose — it feeds directly into PlacedPart.rotated and the exported
-    RotateAngle, so it must NOT simply mean "pw=cutWidth".
+    `rotated` means the part has been physically turned 90 degrees from its own natural pose —
+    it feeds directly into PlacedPart.rotated and the exported RotateAngle, so it must NOT
+    simply mean "pw=cutWidth".
 
     For grain="length" parts, the natural (rotated=False) pose already has cutLength running
     along the board's length-derived axis — confirmed against real golden Nanxing machine data
@@ -119,9 +119,20 @@ def _footprint(part: Part, rotated: bool) -> tuple[float, float]:
     defaulted cutLength onto the board's *width*-derived axis regardless of grain, which is
     backwards for "length" grain and silently rejected any such part whose cutLength exceeded
     the board's width even though it fit easily along the length axis (Issues/issues_001.md).
-    grain="width"/"none" parts are unaffected — their natural pose was already correct.
+
+    grain="none" parts share this same natural-pose baseline, not grain="width"'s — confirmed
+    directly against two real machine-cut XML exports of the *same* job, one from this app, one
+    from Fin China's own optimizer (results/26Y118_data/, 2026-09-02): for a grain="none" part,
+    Fin China's RotateAngle="0" pose runs cutLength along the length axis, and its
+    MachiningPoint="1" (the "not rotated" code) only makes sense under that same pose — matching
+    grain="length"'s convention exactly, not grain="width"'s. The place_parts_on_board scoring
+    below still prefers this natural pose over the alternative when both fit, but only falls
+    back — never a hard constraint — so a part with no free rectangle shaped for the natural
+    pose can still place; before this fix, the *only* orientation available with rotation
+    disabled was already the wrong one for grain="none" parts, which is why toggling "allow
+    rotation" off never changed the mislabeled-part symptom.
     """
-    natural_swap = part.grain == "length"
+    natural_swap = part.grain != "width"
     swap = natural_swap != rotated
     if swap:
         return part.cutWidth, part.cutLength
@@ -144,18 +155,46 @@ def place_parts_on_board(
     placed_parts: list[PlacedPart] = []
     unplaced: list[Part] = []
     for part in sorted(parts, key=lambda item: (-item.area(), -max(item.cutLength, item.cutWidth))):
-        best_choice = None
         orientations = [False, True] if allow_rotation and part.can_rotate() else [False]
-        for rotated in orientations:
-            pw, ph = _footprint(part, rotated)
-            footprint_w = pw + gap
-            footprint_h = ph + gap
-            for rect_idx, rect in enumerate(free_rects):
-                if rect.can_fit(footprint_w, footprint_h):
-                    short_side = min(rect.w - footprint_w, rect.h - footprint_h)
-                    score = (short_side, rect.area())
-                    if best_choice is None or score < best_choice[0]:
-                        best_choice = (score, rect_idx, rotated, pw, ph)
+        # Prefer whichever orientation keeps CutLength running along the board's length axis
+        # (ph == cutLength — see _footprint's own axis convention above) over pure packing
+        # tightness. Grain-locked parts already get this for free (can_rotate() is False for
+        # them, so there's only ever one orientation to try — their "natural" pose already
+        # satisfies it, per _footprint's grain-aware swap). This only has a choice to make for
+        # grain="none" parts with rotation allowed.
+        #
+        # Reported directly (2026-09-02, real NaccNesting screenshots): the machine's own
+        # on-screen dimension label appears to always print the CutLength value along the
+        # horizontal/length-axis position, regardless of a given part's actual RotateAngle —
+        # so a part we place with CutLength running *vertically* (a numerically tighter fit,
+        # but "sideways" to a human, and mismatched on the physical label the shop floor reads
+        # off the screen) shows the right geometry but the wrong-looking number next to the
+        # wrong edge. This is a preference, not a hard constraint: it only reorders which
+        # orientation is *tried first* — if the preferred orientation doesn't fit anywhere on
+        # the sheet, the other orientation is still tried, so nothing that used to fit becomes
+        # unplaced. It can, in principle, leave a little more slack per part than the pure
+        # tightest-fit choice would, at the benefit of correct-looking placement and correct
+        # on-machine labels.
+        if len(orientations) > 1:
+            preferred = [r for r in orientations if _footprint(part, r)[1] == part.cutLength]
+            orientation_groups = [preferred, [r for r in orientations if r not in preferred]] if preferred else [orientations]
+        else:
+            orientation_groups = [orientations]
+
+        best_choice = None
+        for group in orientation_groups:
+            for rotated in group:
+                pw, ph = _footprint(part, rotated)
+                footprint_w = pw + gap
+                footprint_h = ph + gap
+                for rect_idx, rect in enumerate(free_rects):
+                    if rect.can_fit(footprint_w, footprint_h):
+                        short_side = min(rect.w - footprint_w, rect.h - footprint_h)
+                        score = (short_side, rect.area())
+                        if best_choice is None or score < best_choice[0]:
+                            best_choice = (score, rect_idx, rotated, pw, ph)
+            if best_choice is not None:
+                break
         if best_choice is None:
             unplaced.append(part)
             continue
