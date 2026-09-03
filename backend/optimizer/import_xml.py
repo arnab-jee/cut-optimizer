@@ -20,6 +20,25 @@ class InvalidFccXmlError(ValueError):
     """Raised when the uploaded content isn't a recognizable Nanxing FCC nesting XML."""
 
 
+def _recover_raw_cut_dims(golden_cut_length: float, golden_cut_width: float, rotated: bool, grain: str) -> tuple[float, float]:
+    """Real production bug (CLAUDE.md pass 27): a golden file's own CutLength/CutWidth are NOT
+    fixed, raw-part values -- they're placement-relative (CutLength always means "whichever raw
+    dimension is on the board's length axis for this placement", confirmed across all 1039 real
+    golden workpieces with zero exceptions). Copying them straight into Part.cutLength/cutWidth
+    (the old behavior) baked the placement into what's supposed to be a raw, orientation-
+    independent property -- harmless for a pure round-trip (both sides shared the same wrong
+    assumption, see optimizer/export/xml.py's own comment on this), but wrong for anything that
+    treats the imported Part as a normal one. This inverts optimizer/nanxing_packing.py's own
+    `_footprint()` swap decision (a plain transposition, so applying the identical decision a
+    second time recovers the original pair) to recover the true raw (cutLength, cutWidth).
+    """
+    natural_swap = grain != "width"
+    swap = natural_swap != rotated
+    if swap:
+        return golden_cut_length, golden_cut_width
+    return golden_cut_width, golden_cut_length
+
+
 @dataclass
 class ImportedJob:
     parts_by_id: dict[str, Part]
@@ -78,18 +97,23 @@ def parse_fcc_xml(xml_content: str | bytes) -> ImportedJob:
                         "w1": wp.get("EBW1", ""),
                         "w2": wp.get("EBW2", ""),
                     }
+                    rotated = wp.get("RotateAngle") == "90"
+                    grain = GRAIN_CODE_TO_PART_GRAIN.get(wp.get("Grain"), "none")
+                    cut_length, cut_width = _recover_raw_cut_dims(
+                        float(wp.get("CutLength")), float(wp.get("CutWidth")), rotated, grain,
+                    )
                     part = Part(
                         id=wp.get("WorkpieceId"),
                         posId=wp.get("ProdutionNo"),
                         name=wp.get("Name"),
-                        cutLength=float(wp.get("CutLength")),
-                        cutWidth=float(wp.get("CutWidth")),
+                        cutLength=cut_length,
+                        cutWidth=cut_width,
                         finishedLength=float(wp.get("Length")),
                         finishedWidth=float(wp.get("Width")),
                         thickness=float(wp.get("Thickness")),
                         qty=1,
                         material=wp.get("Material"),
-                        grain=GRAIN_CODE_TO_PART_GRAIN.get(wp.get("Grain"), "none"),
+                        grain=grain,
                         edges=edges,
                         customer=wp.get("Customer") or None,
                     )
@@ -111,7 +135,7 @@ def parse_fcc_xml(xml_content: str | bytes) -> ImportedJob:
                             partId=part.id,
                             x=miny + offset_y,
                             y=minx + offset_x,
-                            rotated=wp.get("RotateAngle") == "90",
+                            rotated=rotated,
                             w=(maxy - miny) - 2 * offset_y,
                             h=(maxx - minx) - 2 * offset_x,
                             name=part.name,

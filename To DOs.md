@@ -42,10 +42,40 @@
   what the machine actually reads for F.S., confirmed against real golden data. `CutLength`/
   `CutWidth` (actual cutting) untouched. See `CLAUDE.md` pass 21.
 - [x] Physical label placeholder text sometimes printed next to the wrong (visually shorter)
-  edge. Root cause fixed above (grain-free natural-pose direction) — most real-world cases now
-  match Fin China exactly; a minority of parts can still fall back to the mismatched-looking
-  orientation when their preferred pose doesn't fit the available free space (see the "Open
-  follow-up" note above for the hard-rule tradeoff still on the table).
+  edge. **The actual root cause (pass 27), superseding everything above**: `xml.py` wrote raw,
+  un-rotated `CutLength`/`CutWidth` regardless of the packer's rotation decision — but Fin
+  China's own convention (confirmed against all 1039 real golden workpieces, zero exceptions,
+  present since M5/M6, not new) redefines these attributes *per placement* to always match
+  whichever axis each dimension actually landed on. Fixed by deriving `CutLength`/`CutWidth`/
+  `shifted`/`FccOutline`/`BenchmarkInfo` from `_footprint(part, placed.rotated)` — the same
+  function the packer itself uses — instead of the raw part values; `import_xml.py` got a
+  matching fix so round-trip fidelity holds for the right reason. Verified: **100%
+  self-consistent across all 3 benchmark jobs (849 workpieces)** — any orientation the packer
+  picks is now correctly labeled. Full suite: 197 tests, all green (+2 new). See `CLAUDE.md`
+  pass 27 for the full trail, including why the round-trip tests never caught this (same
+  blind-spot pattern as M11).
+- [x] Resolved in pass 28 — **but the open question above turned out to have a different
+  answer than expected**: instead of simply removing the now-pointless search machinery, a
+  real annotated-photo report from the project owner surfaced a genuinely different, more
+  serious bug — the label *placeholder* itself (not the dimension text) landing inside a
+  neighboring part's territory. Investigated thoroughly: ruled out every exported XML field
+  (byte-identical to Fin China's real file for matching-orientation parts), and ruled out
+  "any rotation, any software" (4 of 6 affected parts are also rotated in Fin China's own real
+  file, without the bug there) — the exact machine-side mechanism remains genuinely
+  unexplained. Given that, simplified `nanxing_packing.py`'s preference from a searched
+  probability back to a **hard constraint** (natural pose required whenever it fits some empty
+  board) as the practical mitigation — minimizing rotation reduces how often this can trigger,
+  regardless of the exact cause. Removed the whole search apparatus (`nanxing.py`'s
+  multi-trial wrapper, `group_caps`/`defer_probability`) — `/optimize`/`/export/pdf`/
+  `/export/xml` are fast again (no 20s wait). **Verified it actually works**: rotation on
+  grain-free parts dropped to 0 on 2 of 3 real benchmark jobs; the third's 16 remaining
+  rotations confirmed geometrically unavoidable. Real, accepted cost, measured: 26Y118 20→22
+  sheets, BEDROOM 3-4 68→70. Dimension-labeling fix (pass 27) re-verified 100% intact. Full
+  suite: 189 tests, all green. **Found, not fixed**: a real `EdgeGroup` face-order bug for
+  the "rotated AND shifted" combination (only 2 data points confirmed so far, needs more
+  before implementing). **Still open**: the stray-placeholder bug's actual mechanism — the
+  hard constraint is a mitigation, not a root-cause fix, and will still matter for the 16
+  genuinely-unavoidable-rotation parts. See `CLAUDE.md` "Remaining work" items 15-17.
 
 
 ## UI/UX Improvements

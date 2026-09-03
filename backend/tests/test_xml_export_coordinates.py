@@ -137,3 +137,74 @@ def test_real_job_info1_info2_match_golden_finished_size():
         assert abs(float(golden_wp.get("Info1")) - float(regen_wp.get("Info1"))) <= 0.01, f"{wid}.Info1"
         assert abs(float(golden_wp.get("Info2")) - float(regen_wp.get("Info2"))) <= 0.01, f"{wid}.Info2"
     assert matched == 55, f"expected all 55 shared barcodes to be found, got {matched}"
+
+
+# Real production bug (CLAUDE.md pass 27, 2026-09-03), present since M5/M6: a real physical
+# workpiece label printed a dimension number next to the wrong-looking edge whenever a part got
+# rotated. Root cause: Fin China's own CutLength/CutWidth attributes are NOT fixed, raw-CSV
+# values -- they're redefined per placement to mean "whichever raw dimension ended up on the
+# board's length axis / width axis for THIS placement" (confirmed directly against all 1039 real
+# golden workpieces: Xspan-6 == CutLength and Yspan-6 == CutWidth, zero exceptions, even where
+# that disagrees with the raw CSV's own column order — 39/55, even 71%, of real parts in the
+# established golden set). optimizer/export/xml.py had always written the raw, unrotated
+# part.cutLength/part.cutWidth regardless of `placed.rotated`. The round-trip test never caught
+# this because import_xml.py copied a golden file's own (already placement-relative) CutLength/
+# CutWidth straight into Part.cutLength/cutWidth, so re-exporting an imported part shared the
+# same wrong assumption on both sides — the exact same structural blind spot M11 hit.
+def test_rotated_part_cutlength_cutwidth_follow_the_placed_axis_not_the_raw_part():
+    # Synthetic, deliberately discriminating case: a part whose raw cutLength (900) is the
+    # larger dimension, placed *rotated* so cutWidth (200) ends up on the board's length axis
+    # instead. If the exporter still wrote the raw part.cutLength/cutWidth unconditionally (the
+    # bug), CutLength would say 900 even though 200 is what's actually running along the length
+    # axis in this placement.
+    part = _part("P1", cutLength=900.0, cutWidth=200.0)
+    placed = PlacedPart(
+        partId="P1", x=50.0, y=50.0, rotated=True, w=900.0, h=200.0,
+        name="P1", material="MAT", thickness=18.0, grain="none",
+    )
+    sheet = Sheet(
+        index=1, material="MAT", boardL=2440.0, boardW=1220.0, thickness=18.0,
+        placed=[placed], offcuts=[], utilizationPct=50.0,
+    )
+    result = OptResult(sheets=[sheet], unplaced=[])
+    margin = Margin(top=0, right=0, bottom=0, left=0)
+    xml_bytes = generate_fcc_xml(result, {"P1": part}, margin, tool_diameter=6.0, part_spacing=6.0)
+    root = etree.fromstring(xml_bytes)
+    wp = root.find(".//Workpiece")
+    # placed.h (=200) is what actually lands on the XML's length axis (X) for a rotated=True
+    # placement here -- see _workpiece_element's own comment for the full axis derivation.
+    assert float(wp.get("CutLength")) == 200.0
+    assert float(wp.get("CutWidth")) == 900.0
+
+
+def test_real_job_exported_cutlength_cutwidth_always_match_the_actual_placed_geometry():
+    # Every workpiece's CutLength/CutWidth must equal its own Lineament polygon's actual X/Y
+    # span (minus the tool-path envelope offset), for *every* orientation the packer picks --
+    # not just the ones that happen to go unrotated. Runs the real sample CSV through the real
+    # packer (not a synthetic single-part case) specifically so this is checked against genuine,
+    # varied rotation decisions, not a hand-picked one.
+    text = (CSV_SAMPLE_DIR / "nesting_machine_data.csv").read_text(encoding="utf-8-sig")
+    parts, errors = parse_csv_text(text)
+    assert errors == []
+    stock = default_stock_for(parts)
+    margin = Margin(top=10, right=10, bottom=10, left=10)
+    result = nanxing_optimize(parts, stock, margin, spacing=5.0)
+    parts_by_id = {p.id: p for p in parts}
+    xml_bytes = generate_fcc_xml(result, parts_by_id, margin, tool_diameter=6.0, part_spacing=5.0)
+    root = etree.fromstring(xml_bytes)
+
+    checked = 0
+    saw_a_rotated_part = False
+    for wp in root.findall(".//Workpiece"):
+        cl, cw = float(wp.get("CutLength")), float(wp.get("CutWidth"))
+        pts = wp.findall("Lineament/Points/Point")
+        xs = [float(p.get("X")) for p in pts]
+        ys = [float(p.get("Y")) for p in pts]
+        xspan, yspan = max(xs) - min(xs), max(ys) - min(ys)
+        checked += 1
+        if wp.get("RotateAngle") == "90":
+            saw_a_rotated_part = True
+        assert abs(xspan - (cl + 6)) < 0.5, f"{wp.get('WorkpieceId')}: CutLength doesn't match the actual length-axis span"
+        assert abs(yspan - (cw + 6)) < 0.5, f"{wp.get('WorkpieceId')}: CutWidth doesn't match the actual width-axis span"
+    assert checked == 55
+    assert saw_a_rotated_part, "expected at least one rotated part -- otherwise this test can't tell the fix from the old bug"

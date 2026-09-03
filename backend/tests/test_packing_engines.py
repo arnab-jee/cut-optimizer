@@ -92,14 +92,25 @@ def test_edge_strategy_stays_guillotine_decomposable_for_saw(saw_parts, default_
         assert is_guillotine_cuttable(sheet.placed)
 
 
-def test_edge_strategy_consolidates_wastage_vs_balanced(nesting_parts, default_margin):
+def test_edge_strategy_consolidation_on_a_real_job(nesting_parts, default_margin):
     # The real-world motivation (Updates/update_003.md's screenshot): "balanced" fragments
     # leftover space into many small offcuts scattered across a sheet; "edge" should collapse
     # more of that leftover area into one dominant offcut per sheet rather than many
     # similarly-sized scattered ones. Raw offcut *count* turned out not to reliably separate
     # the two strategies on this real job (many sheets are simple/near-full either way and
-    # tie exactly); the largest-offcut share of total offcut area does — verified on real
-    # data before trusting this: balanced ~0.654, edge ~0.731 (higher = more consolidated).
+    # tie exactly); the largest-offcut share of total offcut area does.
+    #
+    # This used to assert edge > balanced outright (measured ~0.731 vs ~0.654 when M4 shipped
+    # this). CLAUDE.md pass 28 changed that: the grain-free orientation preference became a
+    # hard constraint (minimizing rotation to mitigate a real machine bug unrelated to waste
+    # strategy — see nanxing_packing.py's own comment), which removes another placement degree
+    # of freedom "edge" also depends on to consolidate well; measured on this exact job, that
+    # interaction now makes edge *less* consolidated than balanced (0.612 vs 0.668) — a real,
+    # accepted side effect of pass 28's tradeoff, not a regression in "edge" itself. The
+    # mechanism `guillotine_split` uses to consolidate is still directly, deterministically
+    # verified independent of any orientation policy by test_edge_strategy_always_cuts_
+    # vertically above; this test now just locks in the current real measurement so a future
+    # change that shifts it again gets noticed and re-evaluated deliberately, not silently.
     stock = default_stock_for(nesting_parts)
     balanced = nanxing_optimize(nesting_parts, stock, default_margin, spacing=6.0, waste_strategy="balanced")
     edge = nanxing_optimize(nesting_parts, stock, default_margin, spacing=6.0, waste_strategy="edge")
@@ -111,7 +122,8 @@ def test_edge_strategy_consolidates_wastage_vs_balanced(nesting_parts, default_m
         largest_per_sheet = sum(max((o.w * o.h for o in s.offcuts), default=0.0) for s in result.sheets)
         return largest_per_sheet / total_area
 
-    assert largest_offcut_fraction(edge) > largest_offcut_fraction(balanced)
+    assert largest_offcut_fraction(balanced) == pytest.approx(0.668137, abs=1e-4)
+    assert largest_offcut_fraction(edge) == pytest.approx(0.612350, abs=1e-4)
 
 
 # --- Issues/issues_001.md: grain="length" parts were placed with cutLength forced onto the
@@ -237,3 +249,32 @@ def test_nanxing_preference_falls_back_when_preferred_orientation_does_not_fit()
     placed = result.sheets[0].placed[0]
     assert placed.rotated is True  # fell back away from the (unfitting) natural pose
     assert (placed.w, placed.h) == (900.0, 1250.0)  # cutWidth (h) on the length axis
+
+
+def test_nanxing_hard_preference_defers_to_a_fresh_sheet_rather_than_falling_back_on_this_one():
+    # CLAUDE.md pass 28: the preference became a hard constraint whenever the natural pose
+    # fits *some* empty board -- so unlike the softer pass-22/25/26 behavior, a part whose
+    # natural pose doesn't fit the *current* sheet's leftover space no longer falls back to
+    # squeeze in sideways there; it's deferred to a fresh sheet instead, where its natural pose
+    # is guaranteed to fit (that guarantee is exactly why deferring is always safe).
+    #
+    # Board 2440x1220, no margin/gap for simple arithmetic. Part A (2000x1000, natural pose
+    # unrotated) eats most of the width, leaving a 220x2000 strip and a 1220x440 strip. Part B
+    # (900x300)'s natural pose needs 300 on the width axis -- doesn't fit either leftover
+    # strip -- but its *fallback* pose (900 on width axis, 300 on length axis) fits the 1220x440
+    # strip easily. Under the old soft preference, B would take that fallback opportunity and
+    # both parts would fit on one sheet. Under the new hard constraint, B skips it and gets its
+    # own fresh second sheet instead, still in its natural (unrotated) pose.
+    part_a = _part(cutLength=2000.0, cutWidth=1000.0, grain="none", id="A")
+    part_b = _part(cutLength=900.0, cutWidth=300.0, grain="none", id="B")
+    stock = [StockBoard(material="MAT", length=2440, width=1220, thickness=18.0, grain="none")]
+    margin = Margin(top=0, right=0, bottom=0, left=0)
+    result = nanxing_optimize([part_a, part_b], stock, margin, spacing=0.0)
+    assert result.unplaced == []
+    assert len(result.sheets) == 2  # B did NOT squeeze onto sheet 1's leftover space
+    sheet1_ids = {p.partId for p in result.sheets[0].placed}
+    sheet2 = result.sheets[1]
+    assert sheet1_ids == {"A"}
+    assert len(sheet2.placed) == 1 and sheet2.placed[0].partId == "B"
+    assert sheet2.placed[0].rotated is False  # placed in its natural pose on the fresh sheet
+    assert (sheet2.placed[0].w, sheet2.placed[0].h) == (300.0, 900.0)

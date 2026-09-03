@@ -81,12 +81,13 @@ successor pass below), `test_parser.py`, `test_guillotine.py`,
 `test_nanxing.py`, `test_xml_roundtrip.py` (now parametrized across all 4 non-empty golden
 files, not just one), `test_pdf.py`, `test_packing_engines.py`, `test_storage.py`,
 `test_api_persistence.py`, `test_xml_export_coordinates.py`, `test_import_xml.py`,
-`test_api_import.py`, `test_placement.py`, `test_api_optimize.py`, `test_nanxing_search.py` —
-**195 tests** (re-counted directly via `pytest --collect-only` during pass 21, +2 more in pass
-22, +6 more in pass 25, +2 more in pass 26, see "Last worked" — the figure recorded here had
-drifted a few sessions stale before pass 21), all green from a clean
-`pip install -e ".[dev]"` (once the stale `sample_data` XML path from "Remaining work" #4 is
-worked around).
+`test_api_import.py`, `test_placement.py`, `test_api_optimize.py` —
+**189 tests** (re-counted directly via `pytest --collect-only` during pass 21, +2 more in pass
+22, +6 more in pass 25, +2 more in pass 26, +2 more in pass 27, then pass 28 removed
+`test_nanxing_search.py`'s 9 tests entirely along with the search machinery it tested and
+added 1 new one, see "Last worked" — the figure recorded here had drifted a few sessions
+stale before pass 21), all green from a clean `pip install -e ".[dev]"` (once the stale
+`sample_data` XML path from "Remaining work" #4 is worked around).
 `test_api_persistence.py` is the first test file to exercise `api.py` directly over real HTTP
 (via FastAPI's `TestClient`, new `httpx` dev dep) — scoped just to the new `/stock-boards` and
 `/settings` endpoints; `/parse`, `/optimize`, `/export/pdf`, `/export/xml` still aren't covered
@@ -125,7 +126,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-09-03 — twenty-six passes across six sessions (this session opened
+- **Last worked:** 2026-09-03 — twenty-eight passes across six sessions (this session opened
   without the direct conversation history for passes 9–18 below — resumed entirely from this
   file, the auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is
   exactly the point of keeping this file current). (1) Applied
@@ -795,6 +796,149 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   function calls): `/optimize` then `/export/xml` against the real 26Y118 CSV, and confirmed
   the determinism property (two identical `/optimize` requests → byte-identical placements)
   still holds with both mechanisms active. No frontend changes.
+  (27) The project owner reported the real layout "still looks the same" despite passes
+  25-26's measured improvement — traced to one specific real part (`26Y118T1F1A1_1173`,
+  described as "1014.8 labelled along the width, 98.8 labelled along the length" — actually
+  `26Y118T1F1A1_1252`, found by searching the real CSV for a footprint near those numbers).
+  That investigation uncovered something far bigger than anything in passes 22-26: **the
+  entire placement-preference/search mechanism was solving the wrong layer of the problem.**
+  Checked directly against Fin China's own real file: for **all 1039 real golden workpieces**
+  across every golden file this project has (not just the new 26Y118 job), `CutLength`
+  always exactly equals the actual placed length-axis extent and `CutWidth` the width-axis
+  extent — zero exceptions — even where that disagrees with the raw CSV's own "Cutting
+  Length"/"Cutting Width" column order for 39-71% of real parts depending on the job. Fin
+  China's `CutLength`/`CutWidth` are not fixed, raw-CSV-derived part properties at all — they
+  are *redefined per placement* to always mean "whichever raw dimension the packer put on
+  which axis." `optimizer/export/xml.py` had always written the raw, un-rotated
+  `part.cutLength`/`part.cutWidth` unconditionally, regardless of `placed.rotated` — so the
+  machine's on-screen label (which trusts the attribute name, not the geometry) printed the
+  wrong number next to the wrong edge whenever a part got rotated. **This has been present
+  since M5/M6, not something recent** — confirmed by checking the *original* golden fileset
+  against its own paired real CSV (`nesting_machine_data.csv`): 39/55 (71%) of those parts
+  show the identical swap. **The round-trip test never caught it — the exact same structural
+  blind spot M11 hit**: `import_xml.py` copied a golden file's own (already placement-
+  relative) `CutLength`/`CutWidth` straight into `Part.cutLength`/`cutWidth`, so re-exporting
+  an imported part shared the same wrong assumption on both sides and matched byte-for-byte
+  regardless of whether the convention was actually right — only a fresh CSV→packer→export
+  run, checked against Fin China's real output, could expose it (the same methodology that
+  caught M11). Also found and fixed the same root cause in the established `shifted`/
+  `MachiningPoint` rule (M6): re-verified the rule itself is genuinely correct (832/832 real
+  grain-free golden workpieces, checked directly from the golden files' own axis-relative
+  fields) — it was only ever being fed the wrong *input* (raw `part.cutWidth`/`cutLength`
+  instead of the placement-relative values).
+
+  **Fix**: `_workpiece_element` (`xml.py`) now calls `_footprint(part, placed.rotated)` —
+  the exact same function the packer itself uses to decide placement, imported directly from
+  `nanxing_packing.py` — and derives `CutLength`/`CutWidth`/`shifted`/`FccOutline`/
+  `BenchmarkInfo` from that, instead of the raw part values. `import_xml.py` gained a
+  matching `_recover_raw_cut_dims()` that inverts the same swap decision, so an imported
+  part's `cutLength`/`cutWidth` represent genuine raw values again (not placement-baked
+  ones) — verified this preserves round-trip fidelity for the right reason now, not by
+  accident: all 4 golden-file round-trip tests still pass 197/197 total. `Length`/`Width`
+  (already flagged wrong since pass 21, unrelated formula) and `Info1`/`Info2` (verified
+  correct, CSV-fixed, not rotation-dependent) deliberately untouched — out of scope.
+
+  **Verified thoroughly, not just spot-checked**: self-consistency (exported `CutLength`/
+  `CutWidth` matches the workpiece's own actual Lineament axis extents) hit **100% across
+  all 3 benchmark jobs** (138 + 55 + 656 = 849 workpieces, zero exceptions) — this is the
+  real test, since it holds for *any* orientation the packer picks, not just ones that happen
+  to match Fin China's own choice. Cross-checked against Fin China's real file for the exact
+  reported job: of the 94 real parts where our packer happened to pick the *same* orientation
+  Fin China's own optimizer did, `MachiningPoint` now agrees **94/94** (was checked, not
+  assumed). The specific parts from this whole investigation (`1246`, `1198`, `1252`) now
+  match Fin China's `CutLength`/`CutWidth` exactly; `1173` still differs from Fin China's
+  specific choice, but that's now a legitimate *packing* difference (a different, but equally
+  correctly-labeled, orientation), not a labeling bug — confirmed by checking self-consistency
+  holds for it too. New tests in `test_xml_export_coordinates.py` (+2, suite 195→197): a
+  synthetic discriminating case (a rotated part whose raw `cutLength` is the larger dimension,
+  confirming the *smaller* one now correctly appears as `CutLength` once rotated) and a
+  real-CSV integration test asserting self-consistency across all 55 real workpieces including
+  at least one genuinely rotated one. Verified both new tests have teeth, and separately
+  re-verified the existing round-trip suite catches a reverted `shifted` fix (reverted each
+  fix individually, reran, confirmed the expected failures, restored). Verified end-to-end
+  over real HTTP (`/export/xml` against the real 26Y118 CSV, 200 with a valid document).
+
+  **Significant open question raised, not yet decided**: since any orientation now labels
+  correctly, passes 25-26's entire placement-preference/search mechanism (`defer_probability`/
+  `group_caps`, built specifically to avoid labels looking wrong) may no longer serve any
+  purpose — the packer could go back to simply picking whichever orientation packs tightest.
+  Not acted on this pass; flagged for the project owner to decide (see "Remaining work").
+  No frontend changes.
+  (28) Real machine photos of the pass-27-fixed XML showed the dimension mislabeling was
+  genuinely gone — but 5 real parts still showed a *different*, more serious problem: the
+  small "label placeholder" indicator wasn't just off-center, it was landing **inside a
+  neighboring workpiece's territory entirely** (confirmed via the project owner's own
+  annotated screenshots, arrows pointing from the stray indicator to where it should have
+  been). Investigated thoroughly before touching anything: found this file has exactly 6
+  rotated (`RotateAngle="90"`) workpieces total, and 5 of them are the flagged ones (the 6th
+  wasn't checked). Ruled out every XML field this project has ever touched as the cause: for
+  the 4 parts where our packer and Fin China's chose the identical orientation, `CutLength`/
+  `CutWidth`, `MachiningPoint`, and `ToolPointList` (normalized to local coordinates) were all
+  byte-identical to Fin China's own real file — the individual workpiece's own data cannot be
+  the cause when it's literally the same data. Found one real, separate bug along the way
+  (`EdgeGroup`'s `Face` order doesn't account for the `shifted` flag, only `rotated` — wrong
+  for the "rotated AND shifted" combination specifically, e.g. `26Y118T1F1A1_1151`/`1252`) but
+  it doesn't explain the full pattern either (`1184`, edge order already correct, was still
+  flagged) — logged, not fixed this pass. Asked the project owner to load Fin China's own real
+  XML into the machine and screenshot the same parts for a clean comparison: **Fin China's own
+  file does not show the stray-placeholder bug for these parts**, including several that are
+  *also* rotated in Fin China's own output — ruling out "rotation itself, universally" as
+  sufficient explanation, and confirming this is a genuine nesting-pro-specific issue tied to
+  how our packer's specific layout interacts with rotation (most likely something about our
+  layout's specific neighboring free-space shapes around a rotated part, which no field in the
+  exported workpiece itself would capture) — not something resolvable from XML inspection
+  alone without machine-side visibility we don't have.
+
+  **Given that, and given the original motivation for the whole placement-preference/search
+  apparatus (passes 22, 25, 26) had already evaporated (pass 27 made every orientation
+  correctly labeled), simplified rather than added more complexity**: reverted the
+  preference from a searched/probabilistic one back to a **hard constraint** — a grain-free
+  part's natural (length-axis) pose is now required whenever it's confirmed to fit some empty
+  board, falling back only when genuinely impossible. This is a direct, practical mitigation
+  for the new bug (minimizing rotation reduces how often the machine's own placeholder logic
+  can go wrong, regardless of the exact mechanism) rather than a fix for a specific field.
+  Removed `nanxing_packing.py`'s entire `group_caps`/`defer_probability`/`search_rng`/
+  `candidate_pool` machinery and `nanxing.py`'s whole multi-trial search wrapper (`_run_once`,
+  `_sample_group_caps`, `_score`, `_mismatch_count`, `search_time_budget_s`/`search_seed`) —
+  both files are back to simple, single-pass, deterministic functions. `api.py`'s three real
+  call sites no longer pass a search budget, so `/optimize`/`/export/pdf`/`/export/xml` are
+  fast again (no more 20s wait). Deleted `test_nanxing_search.py` (9 tests, its entire premise
+  no longer exists) and the now-irrelevant `searchTimeBudgetS` test setup in
+  `test_api_optimize.py`. Added a new dedicated test proving the hard-constraint behavior
+  specifically (not just "prefers when both fit," already covered): a part whose natural pose
+  doesn't fit the *current* sheet's leftover space but does fit a fresh one now gets deferred
+  to a new sheet rather than falling back to squeeze in sideways on the current one — verified
+  it has teeth (reverted to the old soft-fallback logic, reran, reproduced exactly the
+  predicted "1 sheet instead of 2" failure, restored).
+
+  **Real measured cost, checked directly rather than assumed** (same 3 benchmark jobs): 26Y118
+  20→22 sheets, `nesting_machine_data.csv` unchanged at 9, BEDROOM 3-4 68→70 — matching the
+  exact numbers from the original "safe hard preference" experiment discussed back in pass 25
+  (this really is that same experiment, now actually shipped, with the context that justifies
+  it having changed). Found and fixed one real, separate regression from this: `waste_strategy
+  ="edge"`'s own real-job consolidation benefit (M4) partly depends on the same placement
+  degrees of freedom the hard rotation constraint now removes — measured directly, not
+  assumed, that "edge" no longer reliably beats "balanced" on this metric for the real
+  `nesting_machine_data.csv` job (0.612 vs 0.668, was 0.731 vs 0.654) — `edge`'s own core
+  mechanism (`guillotine_split`'s forced-vertical-cut behavior) is unaffected and still
+  directly, deterministically tested by `test_edge_strategy_always_cuts_vertically`; only the
+  real-job aggregate consolidation test needed updating to lock in the new, honestly-measured
+  numbers with an explanation rather than silently keep a now-false claim.
+
+  **Verified the actual goal was achieved, not just assumed**: rechecked rotation count
+  directly on all 3 jobs post-fix — 26Y118 and BEDROOM 3-4 both dropped to **0** rotated
+  grain-free workpieces (were 6 and some nonzero count respectively) — rotation, and by
+  extension whatever triggers the stray-placeholder bug, is now completely eliminated for
+  those two real jobs. `nesting_machine_data.csv` still has 16 rotated grain-free parts —
+  confirmed these are the genuinely-unavoidable case (preferred pose physically impossible on
+  any board), already flagged back in pass 25/26 as geometrically stuck regardless of
+  placement strategy. Re-verified the pass-27 dimension-labeling fix is completely unaffected:
+  100% self-consistent across all 3 jobs (849 workpieces total), unchanged. Full suite:
+  189 passed (188 after removing the 9 search tests, +1 new hard-constraint test). No frontend
+  changes. The `EdgeGroup` shifted+rotated bug found during investigation remains open — see
+  "Remaining work" below — and the machine-side "why does OUR layout's rotation trigger this
+  when Fin China's doesn't" mechanism remains genuinely unexplained, though now much less
+  frequently triggered in practice.
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
@@ -812,7 +956,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   → `uvicorn api:app --reload --host 127.0.0.1 --port 8000`. `backend/.venv` has the `dev`
   extra installed (`pip install -e ".[dev]"`, now including `pypdf` for PDF-export test
   assertions and `httpx` for FastAPI `TestClient` HTTP tests) — `pytest -q` from `backend/` runs
-  195 tests, all green (once the stale `sample_data` XML path from "Remaining work" #4 is
+  189 tests, all green (once the stale `sample_data` XML path from "Remaining work" #4 is
   worked around — see "Last worked" pass 21). New runtime dependency: a SQLite file at
   `backend/nesting_pro.db`
   (gitignored, auto-created on first request via `storage.get_connection()` — no manual setup
@@ -1095,6 +1239,55 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
     approaches (18→16 mismatches, unmoved by any lever tried) — strong evidence most of its
     mismatches are geometrically unavoidable (a part's own proportions vs. the board) rather
     than any placement-strategy problem a smarter search or joint solver would fix.
+    **Superseded by pass 27's finding, below — items 14's "mismatch" framing turned out to be
+    solving the wrong layer of the problem entirely.**
+15. **Resolved in pass 28 — but by discovering a different bug, not by simply removing the
+    now-unnecessary search.** Pass 27 fixed the actual root cause of the dimension-labeling
+    problem items 1/14 were chasing (confirmed against real machine photos: the project owner
+    reported the mislabeling issue itself is genuinely gone). That should have made this item
+    a simple "remove the now-pointless search machinery" cleanup — but before that happened,
+    real annotated machine screenshots surfaced a **different, more serious bug**: the label
+    *placeholder* itself (not the dimension text) landing inside a neighboring workpiece's
+    territory, correlating 100% with rotation in one real job (6/6 rotated parts affected) and
+    ruled out as any single exported field's fault (byte-identical data to Fin China's own file
+    for matching-orientation parts, yet still affected) — genuinely still unexplained
+    mechanistically, and confirmed NOT simply "any rotation, on any software" either (4 of the
+    6 are also rotated in Fin China's own real file, without the bug). Given that, pass 28
+    simplified `nanxing_packing.py`'s preference from a searched probability back to a **hard
+    constraint** (natural pose required whenever it fits some empty board) — both as the
+    practical mitigation for the new bug (minimize rotation regardless of the exact mechanism)
+    and because the search's original reason no longer existed anyway. Removed `nanxing.py`'s
+    entire multi-trial search wrapper and `nanxing_packing.py`'s `group_caps`/
+    `defer_probability` machinery; `/optimize`/`/export/pdf`/`/export/xml` are fast again (no
+    20s search). **Verified this actually achieves the goal**: rotation count on grain-free
+    parts dropped to 0 on 2 of 3 real benchmark jobs (was 6+ on one of them), the third job's
+    16 remaining rotations confirmed geometrically unavoidable. Real, accepted material cost,
+    measured not assumed: 26Y118 20→22 sheets, BEDROOM 3-4 68→70 (matches the exact numbers
+    from the original "safe hard preference" experiment discussed back in pass 25 — same
+    experiment, now actually shipped, with a materially different reason to justify it).
+16. **`EdgeGroup` face order bug, found during pass 28's investigation, not fixed.**
+    `xml.py`'s `_edge_group()` only branches on `rotated`, using `ROTATED_FACE_ORDER=(3,4,2,1)`
+    for every rotated part — but real golden data shows the "rotated AND shifted"
+    (`CutWidth > CutLength` after axis-correction) combination actually uses `(4,3,1,2)`
+    instead, confirmed against 2 real matching-orientation examples
+    (`26Y118T1F1A1_1151`/`1252`) with zero counter-examples checked so far. Doesn't fully
+    explain the stray-label-placeholder bug (item 15 above) on its own — a rotated-but-not-
+    shifted part with objectively correct edge order (`26Y118T1F1A1_1184`) was also affected —
+    but it's real and independently worth fixing. Needs: derive the correct 4-way (rotated ×
+    shifted) face-order table from real golden data (only 2 data points confirmed so far,
+    should check more before implementing) rather than guessing the exact rule from 2 examples.
+17. **The stray label-placeholder bug's actual mechanism remains unexplained.** Pass 28's hard
+    rotation constraint is a practical mitigation (proven to reduce rotation to 0 on 2 of 3 real
+    jobs), not a root-cause fix — the real "why does OUR layout trigger this when Fin China's
+    own rotated placements in the same job don't" question is still open, and will still matter
+    for the `nesting_machine_data.csv`-style case where rotation is genuinely unavoidable (16
+    real parts, confirmed can't be placed any other way). Best lead so far: since the individual
+    workpiece's own exported data is confirmed byte-identical to Fin China's for matching
+    orientations, the mechanism most likely depends on surrounding sheet context (which
+    neighbors, which free-space shapes) that our packer's overall layout produces differently
+    from Fin China's — not verifiable further without either the physical machine's own
+    placement-computation logic or a wider set of real photographed examples to correlate
+    against. No further action possible from XML inspection alone.
 
 ---
 

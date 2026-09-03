@@ -3,6 +3,7 @@ from itertools import count
 from xml.sax.saxutils import escape as xml_escape
 
 from ..model import Margin, OptResult, Offcut, Part, PlacedPart, Sheet
+from ..nanxing_packing import _footprint
 
 # Appendix A.4: a workpiece needs extra holding when its shorter side is <= ~265mm.
 SMALL_WORKPIECE_THRESHOLD = 265.0
@@ -161,12 +162,33 @@ def _workpiece_element(part: Part, placed: PlacedPart, workpiece_id: int, cuttin
     minx, miny = placed.y - PRO_OFFSET, placed.x - PRO_OFFSET
     maxx, maxy = placed.y + placed.h + PRO_OFFSET, placed.x + placed.w + PRO_OFFSET
     rotated = placed.rotated
+    # Real production bug (CLAUDE.md pass 27, 2026-09-03), present since M5/M6: Fin China's own
+    # CutLength/CutWidth attributes are NOT fixed, raw-CSV-column values — they're redefined per
+    # placement to mean "whichever of the part's two raw dimensions ended up on the board's
+    # length axis / width axis for THIS placement" (confirmed directly: across all 1039 real
+    # golden workpieces, Xspan-6 == CutLength and Yspan-6 == CutWidth with zero exceptions, even
+    # though CutLength/CutWidth disagree with the raw CSV's own Cutting Length/Cutting Width
+    # column order for ~40-70% of real parts, depending on the job). This exporter had always
+    # written the raw part.cutLength/part.cutWidth unconditionally, regardless of `rotated` — so
+    # the machine's on-screen label (which trusts the CutLength attribute name, not the
+    # geometry) printed the wrong number next to the wrong edge whenever a part got rotated. The
+    # round-trip test never caught this because import_xml.py copied a golden file's own
+    # (already placement-relative) CutLength/CutWidth straight into Part.cutLength/cutWidth, so
+    # re-exporting an imported part shared the same wrong assumption on both sides and matched
+    # byte-for-byte regardless — the exact same structural blind spot M11 hit (see that row).
+    # `_footprint()` (imported from nanxing_packing, the same function the packer itself uses to
+    # decide placement) is the single source of truth for "which raw dimension is on which axis
+    # for this placement" — pw is the width-axis value, ph is the length-axis value.
+    pw, ph = _footprint(part, rotated)
     # drives both the secondary winding shift (Lineament.RotationAngle) and the MachiningPoint=7
     # variant — verified deterministic against real data, not documented as such in Appendix A.
     # Grain-locked parts (Grain="L"/"W") never shift even when CutWidth>CutLength, confirmed
     # against a golden file with 207 grain-directional workpieces (all unrotated, so this
-    # doesn't interact with the MachiningPoint=7 case, which only fires when rotated).
-    shifted = part.cutWidth > part.cutLength and part.grain == "none"
+    # doesn't interact with the MachiningPoint=7 case, which only fires when rotated). Uses the
+    # placement-relative pw/ph, not the raw part.cutWidth/cutLength -- verified directly against
+    # all 832 real grain-free golden workpieces (100% MachiningPoint match) that this comparison
+    # must be axis-relative, the same convention as CutLength/CutWidth themselves.
+    shifted = pw > ph and part.grain == "none"
     board_points = _rect_points(minx, miny, maxx, maxy, shifted)
     small = min(part.cutLength, part.cutWidth) <= SMALL_WORKPIECE_THRESHOLD
     if rotated:
@@ -184,8 +206,8 @@ def _workpiece_element(part: Part, placed: PlacedPart, workpiece_id: int, cuttin
         "Length": fmt_num(part.finishedLength),
         "Width": fmt_num(part.finishedWidth),
         "Thickness": fmt_num(part.thickness),
-        "CutLength": fmt_num(part.cutLength),
-        "CutWidth": fmt_num(part.cutWidth),
+        "CutLength": fmt_num(ph),
+        "CutWidth": fmt_num(pw),
         "MachiningPoint": machining_point,
         "Grain": WORKPIECE_GRAIN_CODE.get(part.grain, "N"),
         "ProdutionNo": part.posId,
@@ -224,7 +246,7 @@ def _workpiece_element(part: Part, placed: PlacedPart, workpiece_id: int, cuttin
         children=[_points_element(board_points), _cut_infos(small, tool_points)],
     )
     lineament2 = _El("Lineament2", children=[_points_element(board_points)])
-    outline_points = _rect_points(0.0, 0.0, part.cutLength, part.cutWidth, shifted)
+    outline_points = _rect_points(0.0, 0.0, ph, pw, shifted)
     fcc_outline = _El(
         "FccOutline",
         children=[
@@ -232,7 +254,7 @@ def _workpiece_element(part: Part, placed: PlacedPart, workpiece_id: int, cuttin
             for x, y in outline_points
         ],
     )
-    benchmark = _El("BenchmarkInfo", {"ProLength": fmt_num(part.cutLength), "ProWidth": fmt_num(part.cutWidth)})
+    benchmark = _El("BenchmarkInfo", {"ProLength": fmt_num(ph), "ProWidth": fmt_num(pw)})
     return _El("Workpiece", attrs, children=[_edge_group(rotated), lineament, lineament2, fcc_outline, benchmark])
 
 
