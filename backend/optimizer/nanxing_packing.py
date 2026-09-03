@@ -1,5 +1,6 @@
 from __future__ import annotations
 import random
+from collections import Counter
 from dataclasses import dataclass
 
 from .model import Margin, Part, PlacedPart, Sheet, StockBoard, Offcut, WasteStrategy
@@ -140,14 +141,22 @@ def _footprint(part: Part, rotated: bool) -> tuple[float, float]:
     return part.cutLength, part.cutWidth
 
 
+def footprint_signature(part: Part) -> tuple[float, float]:
+    """A rotation-independent identity for "this part is the same size as that one" —
+    (cutLength, cutWidth) sorted, rounded to 0.1mm. Shared between this module's own
+    group-cap enforcement below and nanxing.py's per-sheet cap sampling, so the two always
+    agree on which parts belong to the same duplicate group."""
+    return tuple(sorted((round(part.cutLength, 1), round(part.cutWidth, 1))))
+
+
 def place_parts_on_board(
     parts: list[Part], board: StockBoard, margin: Margin, gap: float, allow_rotation: bool, sheet_index: int,
     waste_strategy: WasteStrategy = "balanced",
-    duplicate_ids: frozenset[str] = frozenset(),
+    group_caps: dict[tuple[float, float], int] | None = None,
     search_rng: random.Random | None = None,
-    defer_probability: float = 0.0,
     candidate_pool: int = 1,
-    _defer_disabled: bool = False,
+    defer_probability: float = 0.0,
+    _caps_disabled: bool = False,
 ) -> tuple[Sheet, list[Part]]:
     """Best-short-side-fit placement against a tracked list of free rectangles: every part
     is matched against every currently free rectangle on the sheet (not just the most
@@ -155,12 +164,36 @@ def place_parts_on_board(
     later, smaller part. `gap` is the clearance reserved around each part (saw kerf or
     router part-spacing — same role either way).
 
-    `duplicate_ids`, `search_rng`, `defer_probability`, and `candidate_pool` are all
-    additive, opt-in search knobs used by nanxing.py's multi-trial search wrapper (see
-    that module's `optimize()` `search_time_budget_s` parameter) — every one of them
-    defaults to a no-op, so a caller that doesn't pass them gets byte-identical behavior
-    to the plain deterministic algorithm this function has always run. Passed as `None`/
-    the empty defaults, this function is unchanged from before the search wrapper existed.
+    `group_caps`, `search_rng`, `candidate_pool`, and `defer_probability` are all additive,
+    opt-in search knobs used by nanxing.py's multi-trial search wrapper (see that module's
+    `optimize()` `search_time_budget_s` parameter) — every one of them defaults to a no-op,
+    so a caller that doesn't pass them gets byte-identical behavior to the plain
+    deterministic algorithm this function has always run. Passed as `None`/the empty
+    defaults, this function is unchanged from before the search wrapper existed.
+
+    Two coexisting, independently-controllable "defer to a fresh sheet" moves, both scoped
+    to duplicate-sized (footprint recurs elsewhere) parts about to use their non-preferred
+    fallback pose:
+
+    - `group_caps` (keyed by `footprint_signature`): a direct, per-sheet cap on how many
+      members of a group are allowed to use the fallback pose on *this* sheet — once
+      reached, further members defer. A deliberate, joint per-sheet decision about a whole
+      group, motivated directly by real evidence (CLAUDE.md pass 26): Fin China's own
+      output spreads identical parts 2/2/2/1 across sheets rather than 6+1 on one.
+    - `defer_probability`: the original, cruder per-part-encounter coin flip (pass 25) —
+      kept alongside `group_caps`, not replaced by it, because real measurement (pass 26)
+      found the two aren't strictly ordered: `group_caps`' more "principled" joint decision
+      sometimes does *worse* than the plain per-encounter coin flip, most likely because
+      re-rolling a fresh independent choice at every single encounter explores more distinct
+      candidate layouts per trial than a single deterministic-once-computed cap does, even
+      though the cap is conceptually closer to what Fin China's output implies. The search
+      wrapper tries both, so it can use whichever wins for a given job rather than this
+      function picking a winner that isn't consistently one.
+
+    Both are safe for the same reason: a genuine duplicate's preferred pose is proven
+    achievable by its sibling(s), so deferring to a fresh sheet can never fail outright
+    (though it can still need its *own* fallback there — this is capped/searched, not an
+    unconditional defer, for exactly that reason).
     """
     width = board.width - margin.left - margin.right
     height = board.length - margin.top - margin.bottom
@@ -168,6 +201,15 @@ def place_parts_on_board(
     placed_parts: list[PlacedPart] = []
     unplaced: list[Part] = []
     deferred_this_sheet = False
+    fallback_count_by_sig: dict[tuple[float, float], int] = {}
+    # Scopes `defer_probability` to genuine duplicates only, the same way `group_caps`' own
+    # keys are always pre-scoped by its caller: deferring is only safe when *some* sibling of
+    # the identical footprint proves the preferred pose is achievable, so a signature with
+    # only one member left in `parts` right now must never be offered the defer_probability
+    # roll, even if it's part of a job-wide duplicate group whose other members already
+    # placed on an earlier sheet -- conservative (it can occasionally decline to defer a
+    # straggler that would technically still be safe to), never unsafe.
+    sig_counts = Counter(footprint_signature(p) for p in parts if p.grain == "none")
     for part in sorted(parts, key=lambda item: (-item.area(), -max(item.cutLength, item.cutWidth))):
         orientations = [False, True] if allow_rotation and part.can_rotate() else [False]
         # Prefer whichever orientation keeps CutLength running along the board's length axis
@@ -217,20 +259,39 @@ def place_parts_on_board(
             continue
 
         # Search wrapper's "hold back a duplicate for a fresh sheet instead of accepting the
-        # mismatched-looking fallback pose now" move (see nanxing.py's optimize() docstring
-        # for why this needs a search, not a fixed rule: an unconditional version of this
-        # either wastes material, per the earlier "safe hard preference" experiment, 26Y118
-        # went 20->22 sheets, or -- unconditional the other way -- risks leaving a whole
-        # sheet's worth of parts spuriously unplaced if every remaining part on it happens to
-        # be deferrable at once; `_defer_disabled` is this function's own safety net against
-        # exactly that, see below). Only ever considered for parts flagged as `duplicate_ids`
-        # by the caller (grain="none" parts whose exact footprint recurs elsewhere in the same
-        # job) about to fall back to their non-preferred pose -- deferring is always safe for
-        # those specifically, since a sibling of the identical size proves the preferred pose
-        # fits some board, so retrying this part on the next (fresh) sheet can never fail.
+        # mismatched-looking fallback pose now" move (see nanxing.py's optimize() docstring for
+        # why this needs a search, not a fixed rule: an unconditional version of this either
+        # wastes material -- the earlier "safe hard preference" experiment made 26Y118 go
+        # 20->22 sheets -- or, unconditional the other way, risks leaving a whole sheet's worth
+        # of parts spuriously unplaced if every remaining part on it happens to be deferrable at
+        # once; `_caps_disabled` is this function's own safety net against exactly that, see
+        # below). `group_caps` bounds how many of this part's duplicate-sized group get to use
+        # the fallback pose on *this* sheet -- once that many have already accepted it, the rest
+        # defer to the next (fresh) sheet instead. Deferring is always safe for a genuine
+        # duplicate: a sibling of the identical size fitting the preferred pose (possibly on an
+        # earlier sheet, possibly still to come) proves that pose is achievable on some board,
+        # so retrying this part on a fresh sheet can never fail outright -- though it can still
+        # need its *own* fallback there if that fresh sheet also runs out of the right-shaped
+        # space, which is exactly why this is capped per-sheet and searched, not just deferred
+        # unconditionally forever.
+        if used_fallback_group and not _caps_disabled and group_caps is not None:
+            sig = footprint_signature(part)
+            cap = group_caps.get(sig)
+            if cap is not None and fallback_count_by_sig.get(sig, 0) >= cap:
+                unplaced.append(part)
+                deferred_this_sheet = True
+                continue
+            fallback_count_by_sig[sig] = fallback_count_by_sig.get(sig, 0) + 1
+
+        # The original, cruder per-encounter coin flip (pass 25) -- see this function's own
+        # docstring for why it's kept alongside group_caps rather than replaced by it.
+        # Independent of the group_caps check above: a trial normally drives only one of the
+        # two (the other left at its inert default), but nothing stops both being active at
+        # once if a future trial design wants to combine them.
         if (
-            used_fallback_group and not _defer_disabled and search_rng is not None
-            and part.id in duplicate_ids and search_rng.random() < defer_probability
+            used_fallback_group and not _caps_disabled and search_rng is not None
+            and defer_probability > 0.0 and sig_counts.get(footprint_signature(part), 0) >= 2
+            and search_rng.random() < defer_probability
         ):
             unplaced.append(part)
             deferred_this_sheet = True
@@ -267,7 +328,7 @@ def place_parts_on_board(
     if not placed_parts and deferred_this_sheet:
         return place_parts_on_board(
             parts, board, margin, gap, allow_rotation, sheet_index, waste_strategy,
-            duplicate_ids, search_rng, defer_probability, candidate_pool, _defer_disabled=True,
+            group_caps, search_rng, candidate_pool, defer_probability, _caps_disabled=True,
         )
 
     board_area = width * height

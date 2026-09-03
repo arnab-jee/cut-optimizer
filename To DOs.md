@@ -27,10 +27,16 @@
   (`nanxing.py`'s `search_time_budget_s`, default 20s at the API layer) that tries many
   randomized placements and keeps whichever full result scores best. Real, safe, measured
   improvement (never worse than before): 26Y118 mismatches 13→5, BEDROOM 3-4 68→67 sheets +
-  72→50 mismatches. Still short of Fin China's actual result (0 mismatches, 19 sheets on
-  26Y118) — closing that needs a bigger structural change (group-block placement), tracked as
-  its own item in `CLAUDE.md` "Remaining work" (item 14), not started. Full suite: 192 tests,
-  all green, +6 new tests for the search layer.
+  72→50 mismatches. **Pass 26 built the group-block placement primitive** this gap called
+  for (a direct per-sheet cap on how many of a duplicate group may use the mismatched pose)
+  — but real measurement found it doesn't clearly beat pass 25's cruder mechanism on its own,
+  so both are now kept side by side (search picks whichever wins per job). Final result: close
+  to pass 25's best numbers (26Y118 13→6, BEDROOM 3-4 68→67 sheets + 72→50), genuinely no
+  worse than before on any job, but **still short of full Fin China parity** — that now looks
+  like it needs jointly planning a sheet's whole part mix (a real cutting-stock-style solver),
+  not just a smarter duplicate-group rule; tracked in `CLAUDE.md` "Remaining work" item 14,
+  not started, unclear if worth the size of that undertaking yet. Full suite: 195 tests, all
+  green, +8 new tests total for the search layer (passes 25+26 combined).
 - [x] Physical machine label showed a blank "F.S." (Final Size) field. Fixed by adding
   `Workpiece.Info1`/`Info2` to the exported XML (source CSV's `Lenght`/`Width` columns) — that's
   what the machine actually reads for F.S., confirmed against real golden data. `CutLength`/

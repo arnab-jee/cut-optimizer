@@ -82,9 +82,9 @@ successor pass below), `test_parser.py`, `test_guillotine.py`,
 files, not just one), `test_pdf.py`, `test_packing_engines.py`, `test_storage.py`,
 `test_api_persistence.py`, `test_xml_export_coordinates.py`, `test_import_xml.py`,
 `test_api_import.py`, `test_placement.py`, `test_api_optimize.py`, `test_nanxing_search.py` —
-**192 tests** (re-counted directly via `pytest --collect-only` during pass 21, +2 more in pass
-22, +6 more in pass 25, see "Last worked" — the figure recorded here had drifted a few sessions
-stale before pass 21), all green from a clean
+**195 tests** (re-counted directly via `pytest --collect-only` during pass 21, +2 more in pass
+22, +6 more in pass 25, +2 more in pass 26, see "Last worked" — the figure recorded here had
+drifted a few sessions stale before pass 21), all green from a clean
 `pip install -e ".[dev]"` (once the stale `sample_data` XML path from "Remaining work" #4 is
 worked around).
 `test_api_persistence.py` is the first test file to exercise `api.py` directly over real HTTP
@@ -125,7 +125,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-09-03 — twenty-five passes across six sessions (this session opened
+- **Last worked:** 2026-09-03 — twenty-six passes across six sessions (this session opened
   without the direct conversation history for passes 9–18 below — resumed entirely from this
   file, the auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is
   exactly the point of keeping this file current). (1) Applied
@@ -742,6 +742,59 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   too (two independent `/optimize` requests with identical bodies returned byte-identical
   placements). No frontend changes — this is a backend algorithm/API change only, no new
   request fields the UI needs to set (the default budget applies automatically).
+  (26) Asked directly to build the "Phase 2" structural piece flagged as pass 25's own
+  remaining gap — a genuine group-block placement primitive, not just more search on the
+  existing engine. Implemented `group_caps` in `nanxing_packing.py`: a direct, per-sheet cap
+  on how many members of a duplicate-sized group may use their non-preferred (mismatched-
+  looking) fallback pose *on that sheet* — once reached, further members defer to a fresh
+  one, sampled fresh at every sheet-opening in `nanxing.py`'s `_sample_group_caps` (the
+  group's remaining count shrinks sheet to sheet, so "how many to commit here" is inherently
+  per-sheet, not whole-job). New shared `footprint_signature()` helper keeps the two modules'
+  notion of "same duplicate group" from drifting apart. Carries the same kind of internal
+  safety net as pass 25's mechanism (retries the exact sheet once with capping disabled if
+  deferring left it spuriously empty) — same failure mode, same fix, now covering the new
+  code path too. **Honest finding, not the outcome expected going in:** measured directly
+  against the same 3 benchmark jobs, `group_caps` alone performed *slightly worse* than pass
+  25's cruder per-part probabilistic `defer_probability` on 2 of 3 jobs (26Y118: 13→7 vs.
+  pass 25's 13→5; BEDROOM 3-4: 72→53 vs. 72→50) — despite being the more "principled"
+  mechanism that directly matches what Fin China's own output implies (a joint per-sheet
+  decision about a whole group). Investigated rather than just accepting the regression:
+  confirmed both mechanisms complete a near-identical number of trials in the same time
+  budget (~1000/5s on 26Y118), ruling out a speed difference — the real cause is almost
+  certainly that a single deterministic per-sheet cap collapses many different random states
+  into the same outcome once `candidate_pool`/other knobs are held aside, while
+  `defer_probability`'s fresh independent roll at *every* encounter keeps generating more
+  distinct candidate layouts per trial for the same wall-clock spend. Tried three refinements
+  to `group_caps`' own sampling (a single per-trial global fraction; a beta-distributed
+  fraction favoring extremes; independent per-group-per-trial fractions) — modest,
+  inconsistent gains, never clearly beating `defer_probability` outright. **Resolution: kept
+  both mechanisms, coexisting, rather than picking a "winner" real measurement doesn't
+  support** — `place_parts_on_board` now accepts `group_caps` and `defer_probability`
+  simultaneously (independent gates, both scoped to genuine duplicates only — see the safety
+  note below), and `nanxing.py`'s trial loop picks one move per trial, biased 85%/15% toward
+  `defer_probability` (`_GROUP_CAPS_TRIAL_PROBABILITY = 0.15`) to preserve most of its proven
+  search depth while keeping `group_caps` available in case a different real job's structure
+  favors it. **Real safety gap found and fixed while wiring defer_probability back in**:
+  unlike `group_caps` (whose keys are always pre-scoped to genuine duplicates by its caller),
+  a naive `defer_probability` re-add would have applied to *any* part using its fallback pose
+  — including one with no sibling anywhere, for which deferring is not proven safe at all.
+  Fixed by computing `sig_counts` directly from the current `parts` argument inside
+  `place_parts_on_board` itself (matching `group_caps`' own conservative scoping: it can
+  occasionally decline to defer a late-stage straggler whose sibling already succeeded on an
+  earlier sheet, but never defers something without proof it's achievable). Caught by a new
+  regression test before it ever reached measurement, not after. **Final measured result**
+  (20s budget, same 3 jobs): 26Y118 13→6, `nesting_machine_data.csv` 18→16 (unchanged, still
+  the geometrically-unavoidable case), BEDROOM 3-4 72→50 with 68→67 sheets — matching or
+  close to pass 25's best numbers, now with `group_caps` genuinely available as a second
+  move rather than a same-session dead end. New/updated tests in `test_nanxing_search.py`
+  (+2, suite 193→195): a regression test for the defer_probability duplicate-scoping gap
+  (verified it has teeth — reverted the fix, reran, reproduced the exact wrong-deferral
+  failure, restored) and a matching safety-net test for the defer_probability code path
+  (mirroring the existing group_caps one, confirming the shared `_caps_disabled` retry covers
+  both). Full suite: 195 passed. Verified end-to-end over real HTTP again (not just direct
+  function calls): `/optimize` then `/export/xml` against the real 26Y118 CSV, and confirmed
+  the determinism property (two identical `/optimize` requests → byte-identical placements)
+  still holds with both mechanisms active. No frontend changes.
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
@@ -759,7 +812,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   → `uvicorn api:app --reload --host 127.0.0.1 --port 8000`. `backend/.venv` has the `dev`
   extra installed (`pip install -e ".[dev]"`, now including `pypdf` for PDF-export test
   assertions and `httpx` for FastAPI `TestClient` HTTP tests) — `pytest -q` from `backend/` runs
-  192 tests, all green (once the stale `sample_data` XML path from "Remaining work" #4 is
+  195 tests, all green (once the stale `sample_data` XML path from "Remaining work" #4 is
   worked around — see "Last worked" pass 21). New runtime dependency: a SQLite file at
   `backend/nesting_pro.db`
   (gitignored, auto-created on first request via `storage.get_connection()` — no manual setup
@@ -1018,23 +1071,30 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
     persistence in this same spirit, so this item is specifically the remaining login/tenancy/
     per-machine-config/template-rename slice, not the whole of M9's original scope.
 14. **Structural group-block placement — the remaining gap to Fin China's actual result
-    (pass 25, see "Last worked").** Pass 25's time-budgeted search layer (`nanxing.py`'s
-    `search_time_budget_s`) got real, measured, safe improvement (26Y118: 13→5 mismatches;
-    BEDROOM 3-4: 68→67 sheets, 72→50 mismatches) but plateaus short of Fin China's own result
-    (0 mismatches, 19 sheets on 26Y118) — confirmed this is a structural ceiling, not a
-    search-depth problem: our engine still only ever decides "place one part into the single
-    best free rectangle," even when randomized: it never reconsiders *how many* of a duplicate
-    group to commit to a given sheet as a joint decision, which is what Fin China's own output
-    implies (spreads identical parts 2/2/2/1 across 4 sheets rather than 6+1 on one). Building
-    that needs a genuine second placement primitive — grouping identical/near-identical
-    footprints up front, computing candidate block sizes per sheet, and searching *how many*
-    to commit per sheet (not just whether to defer one at a time) — on top of, not replacing,
-    pass 25's existing search wrapper and safety-net machinery. Comparable in scope to M4's
-    original packer rewrite; not started. `nesting_machine_data.csv` (55 parts) is worth
-    re-checking once this exists — pass 25 found this specific job barely moves under *any*
-    approach tried so far, suggesting most of its mismatches may be geometrically unavoidable
-    (a part's own proportions vs. the board) rather than a placement-strategy problem, which a
-    group-block primitive wouldn't fix either.
+    (passes 25-26, see "Last worked").** Pass 25's time-budgeted search layer (`nanxing.py`'s
+    `search_time_budget_s`) got real, measured, safe improvement but plateaued short of Fin
+    China's own result (0 mismatches, 19 sheets on 26Y118). **Pass 26 built the group-block
+    primitive this item originally called for** (`group_caps` — a direct per-sheet cap on how
+    many of a duplicate group may use the mismatched pose there, sampled fresh at every
+    sheet-opening) — but real measurement found it does *not* clearly close the remaining gap
+    on its own: it performed slightly *worse* than pass 25's cruder per-part probabilistic
+    mechanism on 2 of 3 benchmark jobs, most likely because a single deterministic per-sheet
+    cap explores fewer distinct candidate layouts per trial than fresh independent per-
+    encounter randomness does, for the same time budget. Both mechanisms are now kept
+    coexisting (search picks one per trial, biased toward whichever measured better), giving
+    a final result close to pass 25's own best numbers (26Y118: 13→6 mismatches; BEDROOM 3-4:
+    68→67 sheets, 72→50 mismatches) — genuinely no worse, sometimes marginally better, but
+    **still not full parity with Fin China**. This suggests the remaining gap isn't just
+    about *which* per-part/per-group move the search tries, but something more structural
+    still missing — e.g. jointly planning a sheet's *entire* part mix (not just one duplicate
+    group in isolation) the way a real cutting-stock/set-covering solver would, which is a
+    bigger undertaking than either pass 25 or 26 attempted (generate many full candidate sheet
+    patterns across all part sizes jointly, then select a covering combination) — not started,
+    and not clearly worth it without more evidence of how much it would actually buy.
+    `nesting_machine_data.csv` (55 parts) is confirmed structurally stuck under both passes'
+    approaches (18→16 mismatches, unmoved by any lever tried) — strong evidence most of its
+    mismatches are geometrically unavoidable (a part's own proportions vs. the board) rather
+    than any placement-strategy problem a smarter search or joint solver would fix.
 
 ---
 
