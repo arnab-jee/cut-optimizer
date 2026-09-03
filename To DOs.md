@@ -22,11 +22,15 @@
   regressions; re-measured efficiency on 3 real jobs (`26Y118_data`, `nesting_machine_data.csv`,
   `26Y117T1F1B1(BEDROOM 3-4)`) — identical sheet counts and utilization before/after in all
   three. Test suite updated for the new convention (`test_packing_engines.py`). See `CLAUDE.md`
-  pass 24 for the full trail. **Open follow-up, not yet decided:** should the preference become
-  a hard constraint (never fall back) to guarantee every part matches Fin China's label
-  convention, at the cost of possibly more sheets / unplaced parts on tight jobs? Left as a
-  preference for now, same as pass 22 shipped it — flagged in `CLAUDE.md` "Remaining work" for a
-  decision.
+  pass 24 for the full trail. **Follow-up resolved in pass 25 — not with a hard rule** (measured
+  and found it makes things worse: 26Y118 20→22 sheets), but with a time-budgeted search layer
+  (`nanxing.py`'s `search_time_budget_s`, default 20s at the API layer) that tries many
+  randomized placements and keeps whichever full result scores best. Real, safe, measured
+  improvement (never worse than before): 26Y118 mismatches 13→5, BEDROOM 3-4 68→67 sheets +
+  72→50 mismatches. Still short of Fin China's actual result (0 mismatches, 19 sheets on
+  26Y118) — closing that needs a bigger structural change (group-block placement), tracked as
+  its own item in `CLAUDE.md` "Remaining work" (item 14), not started. Full suite: 192 tests,
+  all green, +6 new tests for the search layer.
 - [x] Physical machine label showed a blank "F.S." (Final Size) field. Fixed by adding
   `Workpiece.Info1`/`Info2` to the exported XML (source CSV's `Lenght`/`Width` columns) — that's
   what the machine actually reads for F.S., confirmed against real golden data. `CutLength`/

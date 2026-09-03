@@ -23,6 +23,10 @@ def _request_body(parts, target="saw"):
         "allowRotation": True,
         "target": target,
         "wasteStrategy": "balanced",
+        # Explicit 0 so these HTTP tests stay fast and deterministic -- api.py's real default
+        # (DEFAULT_NANXING_SEARCH_TIME_BUDGET_S) is exercised by test_nanxing_search.py instead,
+        # with a small controlled budget of its own.
+        "searchTimeBudgetS": 0,
     }
 
 

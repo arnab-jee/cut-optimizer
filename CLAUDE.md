@@ -81,9 +81,10 @@ successor pass below), `test_parser.py`, `test_guillotine.py`,
 `test_nanxing.py`, `test_xml_roundtrip.py` (now parametrized across all 4 non-empty golden
 files, not just one), `test_pdf.py`, `test_packing_engines.py`, `test_storage.py`,
 `test_api_persistence.py`, `test_xml_export_coordinates.py`, `test_import_xml.py`,
-`test_api_import.py`, `test_placement.py`, `test_api_optimize.py` — **186 tests** (re-counted
-directly via `pytest --collect-only` during pass 21, +2 more in pass 22, see "Last worked" — the
-figure recorded here had drifted a few sessions stale before pass 21), all green from a clean
+`test_api_import.py`, `test_placement.py`, `test_api_optimize.py`, `test_nanxing_search.py` —
+**192 tests** (re-counted directly via `pytest --collect-only` during pass 21, +2 more in pass
+22, +6 more in pass 25, see "Last worked" — the figure recorded here had drifted a few sessions
+stale before pass 21), all green from a clean
 `pip install -e ".[dev]"` (once the stale `sample_data` XML path from "Remaining work" #4 is
 worked around).
 `test_api_persistence.py` is the first test file to exercise `api.py` directly over real HTTP
@@ -124,7 +125,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-09-03 — twenty-four passes across six sessions (this session opened
+- **Last worked:** 2026-09-03 — twenty-five passes across six sessions (this session opened
   without the direct conversation history for passes 9–18 below — resumed entirely from this
   file, the auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is
   exactly the point of keeping this file current). (1) Applied
@@ -630,6 +631,117 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   counts and combined utilization percentages came out identical before and after in all three,
   confirming this fix only relabels which `rotated` value is chosen for placements that were
   already happening, it doesn't change what fits. No frontend changes.
+  (25) A follow-up real screenshot (`results/030920261114/`) showed the exact same
+  wrong-looking-label symptom on a *different* part (`26Y118T1F1A1_1173`) of the same 26Y118
+  job, even after pass 24's fix. Root-caused it fully rather than assuming a regression:
+  reproduced it exactly (down to the same part) once the actual persisted `wasteStrategyDefault`
+  setting ("edge", not "balanced") was accounted for — same debug-trace technique as pass 24 —
+  and found it's the identical, already-understood mechanism: 7 real parts share this exact
+  footprint (898.8x327.6), 6 fit the preferred pose, and whichever one is placed last runs out
+  of correctly-shaped free space and legitimately falls back. The project owner then asked how
+  Fin China avoids this, which led to a genuinely useful discovery: Fin China's own optimizer
+  doesn't just avoid the fallback, it uses **one fewer sheet overall** (19 vs. our 20) on the
+  identical job — checked directly by counting real `<Pattern>` elements in both files — and
+  achieves that by spreading the 7 identical parts across 4 different sheets (2/2/2/1) instead
+  of cramming 6 onto one sheet and leaving a 7th to fight over scraps. That ruled out "hard
+  rule vs. soft preference" as the right framing entirely: a hard rule can only ever match or
+  lose to today's sheet count on our own greedy engine, never beat it the way Fin China does.
+  The project owner separately observed Fin China's own software takes 30-40+ seconds to
+  optimize a comparable job vs. nesting-pro's 1-2s, and confirmed spending real time for a
+  better result is acceptable — that reframed the whole approach from "find a smarter fixed
+  rule" to "spend the available time searching for a better layout." **Prototyped and measured
+  three approaches before implementing anything** (all in scratch scripts, zero repo changes
+  until the last one): (1) a "hard preference for duplicate-sized parts" rule — genuinely
+  unsafe as implemented, caused 8 real parts to go unplaced on `nesting_machine_data.csv`,
+  because "footprint repeats 2+ times" does NOT guarantee the preferred pose is ever
+  achievable (some duplicate groups can be uniformly too wide for the board in that pose); a
+  corrected, geometrically-verified version fixed the unplaced risk but made 26Y118 *worse*
+  than doing nothing (20->22 sheets) — moving further from Fin China's 19, not closer,
+  confirming a fixed rule alone can't close this gap. (2) pure randomized multi-start (shuffled
+  tie-order across up to 9,375 trials) — zero improvement on 2 of 3 jobs; shuffling which
+  identical part is processed last doesn't change how many of that size structurally fit before
+  space runs out. (3) randomized top-K free-rectangle candidate selection (GRASP-style) — real
+  but modest improvement (26Y118: 13->11 mismatches; BEDROOM 3-4: 68->67 sheets, 72->52
+  mismatches), plateauing well short of Fin China's actual result even at thousands of trials —
+  confirmed the ceiling is structural, not a search-depth problem, since our greedy engine
+  never reconsiders a placement once made.
+
+  **Implemented** (approved directly, "please go ahead" then "implement these structural
+  changes... phased manner"): a genuinely different, opt-in search layer on top of the
+  *existing*, unmodified free-rectangle engine, in two parts — **Part A**,
+  `place_parts_on_board()` (`nanxing_packing.py`) gained a "defer" move: when a part flagged as
+  a `duplicate_id` (its exact footprint recurs 2+ times in the same material/grain group,
+  computed once from the *original* group, not the shrinking remainder) is about to fall back
+  to its non-preferred pose, it can instead be skipped entirely for this sheet and retried on
+  the next (fresh) one, governed by a per-trial `defer_probability` roll. This move is safe
+  *when* the caller's duplicate-flagging is right, but not provably safe in general (a
+  duplicate group can still be one whose preferred pose is geometrically impossible
+  everywhere, as approach (1) found the hard way) — so the function carries its own internal
+  safety net: if deferring leaves an entire sheet's pass empty, it retries that exact sheet
+  once with deferring forced off, guaranteeing real progress whenever anything is genuinely
+  placeable, regardless of whether the caller's duplicate heuristic was itself sound. Also
+  added randomized top-K candidate selection (`candidate_pool`), reusing approach (3)'s
+  win. All four new parameters (`duplicate_ids`, `search_rng`, `defer_probability`,
+  `candidate_pool`) default to no-ops, so the function is byte-identical to before for every
+  caller that doesn't pass them. **Part B**, `nanxing.py`'s `optimize()` gained
+  `search_time_budget_s`/`search_seed` (both default to `0`/off, same backward-compatibility
+  guarantee): when a real budget is given, it runs the plain deterministic pass first (always
+  the first candidate, so the search can never return something *worse* than not searching at
+  all), then spends the remaining time on trials with randomized `defer_probability`/
+  `candidate_pool` draws, scoring each full-job result by `(unplaced, sheets, mismatches,
+  -utilization)` — that exact priority order, so it never trades away material efficiency for
+  prettier labels — and keeps the best. `search_seed` (default `0`) makes the *whole search*
+  deterministic: critical in this codebase specifically, since `/optimize`, `/export/pdf`, and
+  `/export/xml` each independently re-run `nanxing_optimize()` from scratch with no shared
+  cache (confirmed directly: two independent `/optimize` calls with identical input produce
+  byte-identical placements) — without a fixed seed, a downloaded XML could silently differ
+  from the preview an operator just checked.
+
+  Wired into `api.py`'s three real call sites (`/optimize`, `/export/pdf`, `/export/xml`) via a
+  new `DEFAULT_NANXING_SEARCH_TIME_BUDGET_S = 20.0` constant (comfortably under Fin China's own
+  30-40+ seconds, confirmed acceptable directly with the project owner), overridable per-request
+  via `searchTimeBudgetS`. Existing HTTP tests (`test_api_optimize.py`) explicitly pass `0` so
+  the pre-existing suite stays fast and deterministic — confirmed this was necessary first
+  (without it, one existing test would have silently grown a 20s runtime from the new default).
+
+  **Real measured results** (all via the actual production `nanxing.optimize()`, not a
+  scratch prototype) on the same 3 benchmark jobs used since pass 22, at a 20s budget:
+
+  | Job | Sheets before → after | Mismatches before → after |
+  |---|---|---|
+  | 26Y118 (138 parts) | 20 → 20 | 13 → **5** |
+  | nesting_machine_data.csv (55 parts) | 9 → 9 | 18 → 16 |
+  | BEDROOM 3-4 (656 parts) | 68 → **67** | 72 → **50** |
+
+  Honest framing: this is real, safe, measured improvement — never worse than the deterministic
+  baseline on any of the 3 jobs, sometimes strictly better on sheets too — but it does **not**
+  reach full parity with Fin China (0 mismatches, 19 sheets on 26Y118). `nesting_machine_data.csv`
+  barely moves under any approach tried, including this one — strong evidence most of its
+  mismatches are geometrically unavoidable given the current placement model (a part's own
+  proportions vs. the board), not a search-depth problem a bigger budget would fix. Closing the
+  remaining gap on 26Y118/BEDROOM 3-4 most likely needs the actual structural piece still
+  missing: a genuine group-block placement primitive (deciding *how many* of a duplicate group
+  to commit to a sheet as a coordinated decision, not just whether to defer one at a time) —
+  discussed as a distinct, larger follow-on phase, not started this pass.
+
+  New `backend/tests/test_nanxing_search.py` (+6 tests, suite 186->192): zero-budget backward-
+  compatibility lock-in, `_compute_duplicate_ids_by_group` unit test (confirms grain-locked
+  parts are correctly excluded), a real-data test asserting the search never scores worse than
+  the baseline and strictly improves on the real 26Y118 job even at a fast 0.5s budget, a
+  fixed-seed determinism test, a deliberately adversarial safety-net test (a fake rng that
+  always defers, on a crafted 2-part scenario where deferring is *not* actually safe by the
+  duplicate heuristic alone — confirms the internal retry-with-defer-disabled safety net saves
+  it anyway), and a geometry-invariant check (no overlaps, everything within margin) against a
+  *searched* result specifically, not just the deterministic path other tests already cover.
+  Verified the safety-net test has teeth: temporarily disabled the retry, reran, reproduced the
+  exact "0 placed, spuriously empty sheet" failure, restored. Full suite: 192 passed. Verified
+  real end-to-end HTTP wiring too (not just direct function calls): a live `TestClient` run of
+  `/optimize` then `/export/xml` against the real 26Y118 CSV at the actual 20s production
+  default, both returning 200 with sensible data (20 sheets, 0 unplaced; a valid 442KB XML
+  document) — and, separately, confirmed the determinism property holds over real HTTP calls
+  too (two independent `/optimize` requests with identical bodies returned byte-identical
+  placements). No frontend changes — this is a backend algorithm/API change only, no new
+  request fields the UI needs to set (the default budget applies automatically).
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
@@ -647,7 +759,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   → `uvicorn api:app --reload --host 127.0.0.1 --port 8000`. `backend/.venv` has the `dev`
   extra installed (`pip install -e ".[dev]"`, now including `pypdf` for PDF-export test
   assertions and `httpx` for FastAPI `TestClient` HTTP tests) — `pytest -q` from `backend/` runs
-  186 tests, all green (once the stale `sample_data` XML path from "Remaining work" #4 is
+  192 tests, all green (once the stale `sample_data` XML path from "Remaining work" #4 is
   worked around — see "Last worked" pass 21). New runtime dependency: a SQLite file at
   `backend/nesting_pro.db`
   (gitignored, auto-created on first request via `storage.get_connection()` — no manual setup
@@ -786,7 +898,14 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
    confirmed the parametrized-across-both-modules test only failed for `nanxing_packing`, not
    `saw_packing`, matching the intentional scoping from pass 22). Logged in `To DOs.md`'s Bug
    Fixes section too, per the project owner's preference for that file as the terse actionable
-   list.
+   list. **The "open follow-up" question above got answered empirically in pass 25, not by a
+   direct decision**: a hard constraint was measured and found to make things *worse* than
+   today (26Y118: 20->22 sheets), not better — so instead of a hard rule, pass 25 built a
+   time-budgeted search layer (see "Last worked" pass 25 for the full writeup) that gets real,
+   safe, measured improvement (26Y118: 13->5 mismatches; BEDROOM 3-4: 68->67 sheets, 72->50
+   mismatches) without ever regressing sheets/unplaced count. Still short of full Fin China
+   parity — tracked as its own follow-on item, see "Remaining work" below (new item, structural
+   group-block placement).
 2. **~~Reload the M11-fixed XML into the real NaccNesting software~~ — done, and superseded by
    an actual physical dry-run cut** (see item 2 and `Issues/issues_005.md`). The layout loaded
    and looked correct; a small demo job was then actually cut.
@@ -898,6 +1017,24 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
     priorities change. Note: passes 13–14 (see "Last worked") already delivered cost/preset
     persistence in this same spirit, so this item is specifically the remaining login/tenancy/
     per-machine-config/template-rename slice, not the whole of M9's original scope.
+14. **Structural group-block placement — the remaining gap to Fin China's actual result
+    (pass 25, see "Last worked").** Pass 25's time-budgeted search layer (`nanxing.py`'s
+    `search_time_budget_s`) got real, measured, safe improvement (26Y118: 13→5 mismatches;
+    BEDROOM 3-4: 68→67 sheets, 72→50 mismatches) but plateaus short of Fin China's own result
+    (0 mismatches, 19 sheets on 26Y118) — confirmed this is a structural ceiling, not a
+    search-depth problem: our engine still only ever decides "place one part into the single
+    best free rectangle," even when randomized: it never reconsiders *how many* of a duplicate
+    group to commit to a given sheet as a joint decision, which is what Fin China's own output
+    implies (spreads identical parts 2/2/2/1 across 4 sheets rather than 6+1 on one). Building
+    that needs a genuine second placement primitive — grouping identical/near-identical
+    footprints up front, computing candidate block sizes per sheet, and searching *how many*
+    to commit per sheet (not just whether to defer one at a time) — on top of, not replacing,
+    pass 25's existing search wrapper and safety-net machinery. Comparable in scope to M4's
+    original packer rewrite; not started. `nesting_machine_data.csv` (55 parts) is worth
+    re-checking once this exists — pass 25 found this specific job barely moves under *any*
+    approach tried so far, suggesting most of its mismatches may be geometrically unavoidable
+    (a part's own proportions vs. the board) rather than a placement-strategy problem, which a
+    group-block primitive wouldn't fix either.
 
 ---
 

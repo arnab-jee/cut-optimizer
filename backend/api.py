@@ -28,6 +28,17 @@ app = FastAPI(title="Nesting Pro Backend")
 # original ~6-7mm shortfall (Issues/issues_005.md).
 UI_DEFAULT_PLACEMENT_CORNER = "top-right"
 
+# How long optimize()'s multi-trial search (optimizer/nanxing.py) is allowed to spend looking
+# for a better layout than the plain deterministic pass, for every real Nanxing request (preview,
+# PDF, and XML export alike -- see the call sites below). Confirmed directly with the project
+# owner (2026-09-03) that spending real time here is fine as long as the result is good;
+# Fin China's own optimizer itself takes 30-40+ seconds on a comparable job, so this stays
+# comfortably under that rather than matching it. Real measurement on 3 benchmark jobs (see
+# CLAUDE.md): genuine, safe improvement (fewer mismatched-looking labels, sometimes fewer
+# sheets too, never worse) -- not full parity with Fin China's own result, which needs the
+# bigger structural redesign tracked separately (CLAUDE.md "Remaining work").
+DEFAULT_NANXING_SEARCH_TIME_BUDGET_S = 20.0
+
 
 def get_db() -> Iterator[sqlite3.Connection]:
     conn = storage.get_connection()
@@ -242,7 +253,7 @@ def optimize_route(request: dict = Body(...)) -> dict:
         if request.get("target") == "saw":
             result = saw_optimize(parts, stock, margin, kerf=request.get("kerf", 0.0), allow_rotation=request.get("allowRotation", True), waste_strategy=waste_strategy, placement_corner=placement_corner)
         else:
-            result = nanxing_optimize(parts, stock, margin, spacing=request.get("partSpacing", request.get("toolDiameter", 6.0)), waste_strategy=waste_strategy, placement_corner=placement_corner, allow_rotation=request.get("allowRotation", True))
+            result = nanxing_optimize(parts, stock, margin, spacing=request.get("partSpacing", request.get("toolDiameter", 6.0)), waste_strategy=waste_strategy, placement_corner=placement_corner, allow_rotation=request.get("allowRotation", True), search_time_budget_s=request.get("searchTimeBudgetS", DEFAULT_NANXING_SEARCH_TIME_BUDGET_S))
         return {
             "sheets": [
                 {
@@ -274,7 +285,7 @@ def export_pdf(request: dict = Body(...)) -> Response:
         if request.get("target") == "saw":
             result = saw_optimize(parts, stock, margin, kerf=request.get("kerf", 0.0), allow_rotation=request.get("allowRotation", True), waste_strategy=waste_strategy, placement_corner=placement_corner)
         else:
-            result = nanxing_optimize(parts, stock, margin, spacing=request.get("partSpacing", request.get("toolDiameter", 6.0)), waste_strategy=waste_strategy, placement_corner=placement_corner, allow_rotation=request.get("allowRotation", True))
+            result = nanxing_optimize(parts, stock, margin, spacing=request.get("partSpacing", request.get("toolDiameter", 6.0)), waste_strategy=waste_strategy, placement_corner=placement_corner, allow_rotation=request.get("allowRotation", True), search_time_budget_s=request.get("searchTimeBudgetS", DEFAULT_NANXING_SEARCH_TIME_BUDGET_S))
         show_cut_lines = request.get("showCutLines", False)
         pdf_data = render_layout_pdf(result, margin, show_cut_lines=show_cut_lines)
         return Response(content=pdf_data, media_type="application/pdf")
@@ -288,7 +299,7 @@ def export_xml(request: dict = Body(...)) -> Response:
         stock = [StockBoard(**s) for s in request.get("stock", [])]
         parts = [Part(**part) for part in request.get("parts", [])]
         placement_corner = request.get("placementCorner", UI_DEFAULT_PLACEMENT_CORNER)
-        result = nanxing_optimize(parts, stock, margin, spacing=request.get("partSpacing", request.get("toolDiameter", 6.0)), waste_strategy=request.get("wasteStrategy", "balanced"), placement_corner=placement_corner, allow_rotation=request.get("allowRotation", True))
+        result = nanxing_optimize(parts, stock, margin, spacing=request.get("partSpacing", request.get("toolDiameter", 6.0)), waste_strategy=request.get("wasteStrategy", "balanced"), placement_corner=placement_corner, allow_rotation=request.get("allowRotation", True), search_time_budget_s=request.get("searchTimeBudgetS", DEFAULT_NANXING_SEARCH_TIME_BUDGET_S))
         parts_by_id = {part.id: part for part in parts}
         xml_data = generate_fcc_xml(
             result,
