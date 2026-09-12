@@ -1100,8 +1100,11 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   (gitignored, auto-created on first request via `storage.get_connection()` — no manual setup
   step, but a fresh clone's first `/stock-boards` or `/settings` call creates it).
 - **Frontend entry point:** `frontend/` (Vite + React + TypeScript), `npm run dev` serves on
-  `http://localhost:5173` with `/api/*` proxied to the backend on `:8000` (`vite.config.ts`) —
-  run both dev servers side by side, no backend changes needed for local dev. `npm run build`
+  `http://localhost:5174` (pinned via `server.port`/`server.strictPort` in `vite.config.ts` —
+  was Vite's own default `5173` with silent auto-increment if busy, which had been drifting the
+  actual dev port around; now fails loudly instead of picking a different port) with `/api/*`
+  proxied to the backend on `:8000` — run both dev servers side by side, no backend changes
+  needed for local dev. `npm run build`
   and `npm run lint` are clean; no test framework wired up yet (type-check + build + one
   Playwright-driven manual browser pass is the only verification so far).
 - **What's done & passing:** M1 parser works for both CSV schemas on real sample data (0 parse

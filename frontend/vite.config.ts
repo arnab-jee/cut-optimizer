@@ -10,6 +10,8 @@ export default defineConfig({
     // allowedHosts: true skips Vite's Host-header allowlist check, which otherwise rejects
     // requests arriving via a non-localhost hostname (like a Tailscale MagicDNS name).
     host: true,
+    port: 5174,
+    strictPort: true,
     allowedHosts: true,
     proxy: {
       '/api': {
