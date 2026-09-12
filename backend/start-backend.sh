@@ -5,4 +5,4 @@ if [ -f ".venv/bin/activate" ]; then
   # shellcheck source=/dev/null
   source .venv/bin/activate
 fi
-exec uvicorn api:app --reload --host 0.0.0.0:5175 --port 8000
+exec uvicorn api:app --reload --host 0.0.0.0 --port 8000
