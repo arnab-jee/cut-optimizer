@@ -30,7 +30,7 @@ export are all local computation already; the network dependency that existed wa
   PyInstaller (or any Python-freezing tool) needs to run on the target OS to produce a working
   Windows binary. This is the one hard technical constraint the whole plan routes around.
 - **No Windows dev machine available** for building, but a GitHub remote already exists
-  (`arnab-jee/nesting-pro`) — so GitHub Actions' `windows-latest` runners are the way to produce
+  (`arnab-jee/cut-optimizer`) — so GitHub Actions' `windows-latest` runners are the way to produce
   a real, working Windows build without needing to own or borrow a Windows machine at all.
 - **v1 scope: "simple launcher," not a native app window.** A script/shortcut starts a local
   server on `127.0.0.1` and opens it in the system's default browser — not an Electron/Tauri

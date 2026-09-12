@@ -1059,6 +1059,24 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   `sample_data` golden-XML path issue, "Remaining work" item 5). No frontend logic changed
   (title/header text only) — `tsc -b`/lint/build not re-run this pass since no `.ts`/`.tsx`
   logic changed, only string literals.
+  (32) Two small follow-on branding passes. First, added a copyright footer to the app UI
+  ("Copyright © 2026 ARNIEM. All rights reserved.", `App.tsx`/`App.css`) — deliberately separate
+  from `LICENSE` (which already carries its own, differently-named copyright notice; not
+  touched). Second, the project owner asked whether the GitHub repo itself could be renamed to
+  match — confirmed possible but not doable from inside this session (no `gh` CLI installed, no
+  GitHub credentials available, and a repo rename needs either the web UI or an authenticated
+  API call), so walked through the manual steps instead. The project owner then renamed both the
+  local working directory (`nesting-pro/` → `cut-optimizer/`, done outside this session — the
+  environment's working directory updated to match automatically) and the actual GitHub repo
+  (`arnab-jee/nesting-pro` → `arnab-jee/cut-optimizer`) themselves. Once done, updated the local
+  git remote (`git remote set-url origin https://github.com/arnab-jee/cut-optimizer.git`) and
+  verified it actually works (`git fetch` succeeded, `origin/main` matches local `HEAD` exactly —
+  GitHub's automatic old-URL redirect meant nothing was ever out of sync, so this was purely
+  making the local remote canonical again, not a recovery). Updated the one still-current
+  GitHub-path reference in `DESKTOP_APP_PLAN.md` (`arnab-jee/nesting-pro` → `arnab-jee/
+  cut-optimizer`) — left pass 31's own changelog sentence above (in this file) untouched, since
+  it accurately describes what pass 31 deliberately did *not* do at the time, and rewriting past
+  narrative to match a later decision would misrepresent the history. No code changes.
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
