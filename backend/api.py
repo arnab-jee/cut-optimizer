@@ -23,7 +23,7 @@ app = FastAPI(title="Nesting Pro Backend")
 # about the packer's own native fill origin that mirror_sheet() relies on to know when *not* to
 # mirror. This one is purely a UI/API preference and is free to change independently. Set to
 # top-right per real-world confirmation: the factory's machine has its job-area datum fixed at
-# top-right, and every job run from that corner (both nesting-pro's and Fin China's own output)
+# top-right, and every job run from that corner (both CutOptimizer's and Fin China's own output)
 # has come back within normal machining tolerance, while bottom-left was the corner behind the
 # original ~6-7mm shortfall (Issues/issues_005.md).
 UI_DEFAULT_PLACEMENT_CORNER = "top-right"

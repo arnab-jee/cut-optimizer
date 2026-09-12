@@ -11,7 +11,7 @@ from .model import Margin, Offcut, PlacedPart, Sheet, StockBoard
 # other, only where the whole already-decided layout sits on the board.
 #
 # Prompted by a real physical dry-run (Issues/issues_005.md): a demo job cut 6-7mm short on one
-# axis, with nesting-pro's default placement sitting in a different corner of the table than the
+# axis, with CutOptimizer's default placement sitting in a different corner of the table than the
 # machine's own inbuilt optimizer's placement for a comparable job. To test whether table
 # position (vacuum-zone coverage, axis calibration, fence distance) affects cut accuracy, the
 # *exact* layout needs to be reproducible in a different board corner — this lets the operator

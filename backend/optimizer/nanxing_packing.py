@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .model import Margin, Part, PlacedPart, Sheet, StockBoard, Offcut, WasteStrategy
 
@@ -242,3 +242,103 @@ def place_parts_on_board(
         ),
         unplaced,
     )
+
+
+def _migrate_all_parts(
+    parts_to_place: list[PlacedPart],
+    targets: list[tuple[list[PlacedPart], list[Rectangle]]],
+    margin: Margin, gap: float, waste_strategy: WasteStrategy,
+) -> list[tuple[list[PlacedPart], list[Rectangle]]] | None:
+    """Try to relocate every part in `parts_to_place` into one of `targets`' leftover free
+    space (each target is that sheet's own (placed_parts, free_rects) pair). Each part keeps
+    its already-decided footprint and orientation exactly as-is (w/h/rotated unchanged) --
+    this relocates a part, it never re-decides which pose it should use, since the part was
+    already placed via place_parts_on_board's own hard-constraint-correct orientation logic
+    on its original sheet.
+
+    Best-fit across ALL targets at once (not just the first one that fits), so a batch of
+    migrating parts spreads across whichever targets have the roomiest matching leftover
+    space, rather than piling everything onto one. Returns the updated targets (a fresh list,
+    the input is never mutated) if every part found a home; returns None, with nothing
+    changed, the moment any single part has nowhere to go -- an all-or-nothing move, since a
+    partial migration would leave the sheet being dissolved with orphaned parts.
+    """
+    trial = [(list(placed), list(rects)) for placed, rects in targets]
+    for part in sorted(parts_to_place, key=lambda p: -(p.w * p.h)):
+        footprint_w, footprint_h = part.w + gap, part.h + gap
+        best = None  # (score, target_idx, rect_idx)
+        for ti, (_, rects) in enumerate(trial):
+            for ri, rect in enumerate(rects):
+                if rect.can_fit(footprint_w, footprint_h):
+                    short_side = min(rect.w - footprint_w, rect.h - footprint_h)
+                    score = (short_side, rect.area())
+                    if best is None or score < best[0]:
+                        best = (score, ti, ri)
+        if best is None:
+            return None
+        _, ti, ri = best
+        placed_list, rects = trial[ti]
+        target_rect = rects.pop(ri)
+        placed_list.append(replace(part, x=target_rect.x + margin.left, y=target_rect.y + margin.top))
+        rects.extend(guillotine_split(target_rect, footprint_w, footprint_h, waste_strategy))
+        trial[ti] = (placed_list, merge_free_rects(rects))
+    return trial
+
+
+def consolidate_sheets(
+    sheets: list[Sheet], board: StockBoard, margin: Margin, gap: float, waste_strategy: WasteStrategy = "balanced",
+) -> list[Sheet]:
+    """Post-processing pass over a single (material, thickness, grain) group's already-packed
+    sheets: repeatedly tries to dissolve the *least full* sheet by relocating every one of its
+    parts into other sheets' real leftover free space, dropping the sheet entirely when that
+    fully succeeds. `place_parts_on_board` fills sheets greedily, one at a time, and never
+    revisits an earlier one -- so a part that would have fit comfortably into sheet 1's
+    leftover space can end up stranded on its own sparse sheet 3 instead, real material this
+    pass exists to recover (CLAUDE.md pass 29, prompted directly by a real annotated
+    screenshot showing exactly this pattern: a 37.9%-full sheet sitting next to others with
+    real unused width).
+
+    Never changes which orientation any part uses (relocation only, via `_migrate_all_parts`)
+    and never fails to preserve every part -- a sheet is only ever dropped once *all* of its
+    parts have a confirmed new home; if even one doesn't fit anywhere else, that sheet (and
+    every part on it) is left exactly as `place_parts_on_board` produced it.
+    """
+    if len(sheets) <= 1:
+        return sheets
+    width = board.width - margin.left - margin.right
+    height = board.length - margin.top - margin.bottom
+
+    def offcuts_to_rects(sheet: Sheet) -> list[Rectangle]:
+        return [Rectangle(o.x - margin.left, o.y - margin.top, o.w, o.h) for o in sheet.offcuts]
+
+    state: list[tuple[list[PlacedPart], list[Rectangle]]] = [(list(s.placed), offcuts_to_rects(s)) for s in sheets]
+    # `alive` tracks which original sheet indices survive, always kept in their *original*
+    # relative order (index 0 first, etc.) so the final output preserves the same sheet order
+    # place_parts_on_board produced -- separate from `attempt_order`, a throwaway ranking
+    # (least-full first) used only to decide which sheet to *try* dissolving next.
+    alive = list(range(len(sheets)))
+
+    progressed = True
+    while progressed and len(alive) > 1:
+        progressed = False
+        attempt_order = sorted(alive, key=lambda i: sum(p.w * p.h for p in state[i][0]))
+        for idx in attempt_order:
+            other_indices = [j for j in alive if j != idx]
+            others = [state[j] for j in other_indices]
+            migrated = _migrate_all_parts(state[idx][0], others, margin, gap, waste_strategy)
+            if migrated is not None:
+                for oi, new_state in zip(other_indices, migrated):
+                    state[oi] = new_state
+                alive.remove(idx)
+                progressed = True
+                break  # restart the ranking from the new set of still-alive sheets
+
+    board_area = width * height
+    result: list[Sheet] = []
+    for i in alive:
+        placed, rects = state[i]
+        placed_area = sum(p.w * p.h for p in placed)
+        utilization = 0.0 if board_area <= 0 else round(placed_area / board_area * 100.0, 2)
+        offcuts = [Offcut(x=r.x + margin.left, y=r.y + margin.top, w=r.w, h=r.h) for r in rects if r.area() > 1e-6]
+        result.append(replace(sheets[i], placed=placed, offcuts=offcuts, utilizationPct=utilization))
+    return result

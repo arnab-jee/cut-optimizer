@@ -162,7 +162,10 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Nesting Pro</h1>
+        <div className="app-title-row">
+          <img src="/favicon.svg" alt="" className="app-logo" width={36} height={36} />
+          <h1>CutOptimizer</h1>
+        </div>
         <p className="app-tagline">Panel saw &amp; Nanxing nesting, from a parts CSV to a machine-ready file.</p>
       </header>
 

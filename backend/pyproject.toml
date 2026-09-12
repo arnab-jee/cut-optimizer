@@ -1,5 +1,5 @@
 [project]
-name = "nesting_pro_backend"
+name = "cutoptimizer_backend"
 version = "0.1.0"
 description = "Wood panel optimization core and API for saw and nanxing nesting."
 readme = "README.md"

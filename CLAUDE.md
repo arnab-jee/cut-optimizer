@@ -1,4 +1,4 @@
-# CLAUDE.md — Wood Panel Optimization Web App (nesting-pro)
+# CLAUDE.md — Wood Panel Optimization Web App (CutOptimizer, formerly nesting-pro)
 
 > Durable project context for Claude Code. This file is auto-loaded every session.
 > Keep the **Current state** section updated as work lands so a lost/closed session
@@ -81,11 +81,11 @@ successor pass below), `test_parser.py`, `test_guillotine.py`,
 `test_nanxing.py`, `test_xml_roundtrip.py` (now parametrized across all 4 non-empty golden
 files, not just one), `test_pdf.py`, `test_packing_engines.py`, `test_storage.py`,
 `test_api_persistence.py`, `test_xml_export_coordinates.py`, `test_import_xml.py`,
-`test_api_import.py`, `test_placement.py`, `test_api_optimize.py` —
-**189 tests** (re-counted directly via `pytest --collect-only` during pass 21, +2 more in pass
+`test_api_import.py`, `test_placement.py`, `test_api_optimize.py`, `test_nanxing_consolidation.py` —
+**193 tests** (re-counted directly via `pytest --collect-only` during pass 21, +2 more in pass
 22, +6 more in pass 25, +2 more in pass 26, +2 more in pass 27, then pass 28 removed
 `test_nanxing_search.py`'s 9 tests entirely along with the search machinery it tested and
-added 1 new one, see "Last worked" — the figure recorded here had drifted a few sessions
+added 1 new one, +4 more in pass 29, see "Last worked" — the figure recorded here had drifted a few sessions
 stale before pass 21), all green from a clean `pip install -e ".[dev]"` (once the stale
 `sample_data` XML path from "Remaining work" #4 is worked around).
 `test_api_persistence.py` is the first test file to exercise `api.py` directly over real HTTP
@@ -126,7 +126,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-09-03 — twenty-eight passes across six sessions (this session opened
+- **Last worked:** 2026-09-07 — thirty passes across seven sessions (this session opened
   without the direct conversation history for passes 9–18 below — resumed entirely from this
   file, the auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is
   exactly the point of keeping this file current). (1) Applied
@@ -414,14 +414,14 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   software, that would conclusively point to a physical/machine-side cause (tool wear, axis
   calibration/backlash — specifically whichever physical axis corresponds to board width, since
   only that axis is affected — or board squareness/clamping during this specific cut) rather than
-  anything in nesting-pro. No code changed this pass. (17) Followed up on pass (16)'s
-  investigation: since the two screenshots showed nesting-pro's demo layout sitting in the
+  anything in CutOptimizer. No code changed this pass. (17) Followed up on pass (16)'s
+  investigation: since the two screenshots showed CutOptimizer's demo layout sitting in the
   board's bottom-left corner while Nanxing's own inbuilt optimizer chose the opposite (top-right)
   for a comparable job, the project owner wanted to test whether *table position* (vacuum-zone
   coverage, axis calibration, fence distance) rather than software explains the reported
   shortfall. Discussed the cleanest way to test this: reusing Nanxing's own inbuilt optimizer
   would confound the test (changes *which software* generated the file *and* where it lands, at
-  the same time) — the clean version keeps nesting-pro's own packing decisions untouched and only
+  the same time) — the clean version keeps CutOptimizer's own packing decisions untouched and only
   changes where the resulting layout sits on the board. Neither app supported repositioning an
   already-generated layout, so this needed a real feature: added a **"Board corner"** dropdown
   (all 4 corners, per explicit request over a simpler 2-way toggle). New `optimizer/placement.py`
@@ -648,7 +648,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   rule vs. soft preference" as the right framing entirely: a hard rule can only ever match or
   lose to today's sheet count on our own greedy engine, never beat it the way Fin China does.
   The project owner separately observed Fin China's own software takes 30-40+ seconds to
-  optimize a comparable job vs. nesting-pro's 1-2s, and confirmed spending real time for a
+  optimize a comparable job vs. CutOptimizer's 1-2s, and confirmed spending real time for a
   better result is acceptable — that reframed the whole approach from "find a smarter fixed
   rule" to "spend the available time searching for a better layout." **Prototyped and measured
   three approaches before implementing anything** (all in scratch scripts, zero repo changes
@@ -883,7 +883,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   XML into the machine and screenshot the same parts for a clean comparison: **Fin China's own
   file does not show the stray-placeholder bug for these parts**, including several that are
   *also* rotated in Fin China's own output — ruling out "rotation itself, universally" as
-  sufficient explanation, and confirming this is a genuine nesting-pro-specific issue tied to
+  sufficient explanation, and confirming this is a genuine CutOptimizer-specific issue tied to
   how our packer's specific layout interacts with rotation (most likely something about our
   layout's specific neighboring free-space shapes around a rotated part, which no field in the
   exported workpiece itself would capture) — not something resolvable from XML inspection
@@ -939,6 +939,126 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   "Remaining work" below — and the machine-side "why does OUR layout's rotation trigger this
   when Fin China's doesn't" mechanism remains genuinely unexplained, though now much less
   frequently triggered in practice.
+  (29) Real machine testing confirmed pass 28's fix: the label-placeholder bug is fully
+  resolved. But the project owner reported average utilization dropped to 63.8% and shared a
+  real annotated screenshot (three sheets of the same material, 57.5%/77.2%/37.9% used)
+  showing exactly why: `place_parts_on_board` fills sheets greedily, one at a time, and never
+  revisits an earlier one once it moves on — a part that would fit comfortably into sheet 1's
+  leftover space can end up stranded on its own sparse sheet 3 instead, and pass 28's hard
+  rotation constraint (removing a placement degree of freedom) made this pre-existing blind
+  spot bite harder than before. Built a **post-processing consolidation pass**,
+  `consolidate_sheets()` (`nanxing_packing.py`), scoped to exactly this: repeatedly try to
+  dissolve the *least full* sheet within one (material, thickness, grain) group by relocating
+  every one of its parts into other sheets' real leftover free-rectangle space (tracked via
+  each sheet's own `offcuts`, converted back to local `Rectangle`s), dropping the sheet
+  entirely only when *all* of its parts find a new home — an all-or-nothing move per
+  candidate sheet, never a partial one. Migration relocates a part's `x`/`y` only; it never
+  re-decides `rotated`/`w`/`h`, since the part was already placed via the hard-constraint-
+  correct orientation logic on its original sheet — this pass cannot reintroduce a labeling
+  regression by construction. `nanxing.py`'s `optimize()` now collects each (board, grain)
+  group's sheets *before* mirroring/indexing, runs `consolidate_sheets()` on that native-
+  coordinate group, then assigns final sequential sheet numbers and mirrors afterward (mirror
+  is a pure post-placement reflection, unaffected by running before or after).
+
+  **Real, measured improvement, checked directly**: 26Y118 22→**21** sheets (63.8%→**66.9%**
+  utilization — recovering roughly half of pass 28's cost), BEDROOM 3-4 70→**69**,
+  `nesting_machine_data.csv` unchanged (no consolidation opportunity existed in that job at
+  its own margin/spacing). Zero regressions: re-verified 0 overlaps, 0 out-of-bounds
+  placements, every part accounted for (138/55/656 exactly) across all 3 jobs, and the
+  dimension-labeling fix stayed 100% self-consistent throughout (as guaranteed by
+  construction, but checked anyway rather than assumed).
+
+  **Investigated a real bug found while implementing this, before it shipped**: the first
+  version sorted the "which sheet to try dissolving next" ranking *in place*, silently
+  reordering which physical sheet output as "1" vs "2" even when nothing was actually
+  dissolved — caught by a dedicated ordering test before merging, not after. Fixed by ranking
+  a separate `attempt_order` copy while keeping the real `alive` list in original creation
+  order for the final output.
+
+  **Investigated the project owner's exact annotated example directly, found a genuine,
+  honest limit of this technique**: sheet 3's 4 parts (from the real screenshot) are *still*
+  on their own sheet after consolidation — a *different* sheet elsewhere in the job dissolved
+  instead. Traced why: sheet 3's parts each need >=450mm on their short axis; sheet 1's
+  biggest offcut is 450.5x627mm -- *0.6mm* too narrow for two of them. This pass's technique
+  only relocates parts into leftover space exactly as the original greedy pass left it; it
+  cannot reshape sheet 1/2's own internal arrangement to open up that extra half-millimeter.
+  Closing that specific gap needs genuine joint/global re-optimization (the cutting-stock-
+  style approach flagged in earlier passes as a bigger, less certain undertaking) — reported
+  to the project owner honestly rather than overclaiming full resolution of their example.
+
+  New `backend/tests/test_nanxing_consolidation.py` (+4 tests, suite 189→193): a clean
+  dissolve case, the all-or-nothing rejection case, the sheet-order-preservation regression
+  test (verified it has teeth — reverted to in-place sorting, reran, reproduced the exact
+  reordering bug, restored), and a test confirming migration never touches a part's
+  orientation/footprint. Also verified the all-or-nothing guard has teeth (removed it,
+  reran, reproduced a crash from the resulting invalid state, restored). Updated
+  `test_edge_strategy_consolidation_on_a_real_job`'s locked-in real numbers again (edge
+  strategy's own sheet count dropped 10→9 for `nesting_machine_data.csv` under this pass,
+  pushing its consolidation metric back ahead of "balanced" — not because "edge" itself
+  changed, but because a genuine sheet-count win changed the metric's own denominator).
+  Full suite: 193 passed. No frontend changes.
+  (30) A new, distinct real-machine failure report (`26Y125_FLOOR 14,15&16`, a 203-part job,
+  screenshot `results/070920261609/label_create_error.jpeg`): NaccNesting rejected the
+  exported XML outright on import with **"LabelPosCalc, error code -1, Fincnc.dll call
+  exception error"** — the project owner noted the other same-session XMLs (6&9, 10&11,
+  24&25) all imported fine. Investigated thoroughly before touching any code: confirmed the
+  file is well-formed XML (parses clean), 203/203 CSV barcodes present exactly once in the
+  export with no duplicate `WorkpieceId`/`ID`, zero part-part or part-oddment overlaps across
+  all 44 sheets, zero out-of-board-bounds placements (checked in real machine XML/Y space
+  against each sheet's own margin), the known "rotated AND shifted" `EdgeGroup` bug (item 16)
+  doesn't apply to any workpiece in this file (none of its rotated parts are also shifted),
+  and the file's extreme-aspect-ratio strips (down to 73.8mm short side, ~31:1 ratio) are
+  identically present — same minimum, same max ratio — in the sibling files that import fine,
+  ruling out "unusually thin/long part" as the differentiator. One real lead was chased and
+  **disproven before acting on it**: 8 `Oddments` elements in this file have a negative
+  `Length`/`Width` (e.g. `Length="-2.7"`) — `_oddments_element`'s `usable_length/width =
+  offcut.h/w - tool_diameter` goes negative whenever the raw leftover sliver is thinner than
+  the 6mm tool. Checked whether this is a genuine, currently-unhandled defect: cross-checked
+  every real Fin-China golden XML in `sample_data/` and found **255 of 898 real golden
+  Oddments (28%) also carry negative Length/Width**, confirming this is Fin China's own
+  established convention for a too-thin-to-recut sliver, not a bug — retracted rather than
+  "fixed" a non-bug, same discipline as pass 16's Margin-transpose retraction. Attempted a
+  direct reproduction through today's actual code (`optimizer.parser.parse_csv_text` →
+  `optimizer.nanxing.optimize` → `export.xml.generate_fcc_xml`) to get a byte-exact second
+  copy to analyze — matched the real file's sheet count (44, under `waste_strategy="edge"`)
+  but not byte-for-byte (placement order differs slightly, most likely a margin/grain
+  assumption in the repro script not matching the real request exactly) — so the reproduction
+  is structurally similar but not authoritative; all findings above were checked against the
+  **actual file the project owner provided**, not the repro. **No root cause found this
+  pass** — every mechanism this project has previously fixed or flagged was checked and ruled
+  out. Since this is a closed-source machine-side exception with no further static signal to
+  chase, prepared an empirical bisection instead of guessing further:
+  `results/070920261609/bisect/bisect_material_1_GP_HDH17_125_OS_5900.xml` (14 sheets/74
+  workpieces) and `bisect_material_2_GP_HDH17_5900_BS.xml` (30 sheets/129 workpieces) — the
+  same file split at its two `<Patterns>` (material) blocks, each re-wrapped as its own valid
+  `FccRoot` document (verified well-formed) — for the project owner to test-import
+  independently on the real machine; whichever one reproduces the crash halves the search
+  space, and can be bisected further by sheet range if needed. Logged as open in "Remaining
+  work" item 19 below rather than guessed at further. No code changed this pass.
+  (31) Renamed the app from "nesting-pro" to **CutOptimizer** (project owner's decision — the
+  old name no longer fit once the app grew well past a nesting-only tool into parsing,
+  guillotine + free-nest optimization, PDF/XML export, presets/cost tracking, and consolidation
+  search). Scoped to product-facing identity and living docs, not to external/filesystem
+  identifiers that would be a separate, bigger decision: updated the frontend `<title>` and
+  `<h1>` (`index.html`, `App.tsx`), `README.md`/`ROADMAP.md`/`DESKTOP_APP_PLAN.md` headers and
+  prose, `backend/pyproject.toml`'s package name (`nesting_pro_backend` → `cutoptimizer_backend`),
+  and the "nesting-pro" mentions throughout this file's own historical narrative (cosmetic
+  relabeling only — no fact changed). Left untouched, deliberately: the actual GitHub repo
+  (`arnab-jee/nesting-pro`) and the local working directory name (both filesystem/external
+  identifiers, renaming either is a separate, more disruptive action not asked for here), and
+  every file under `Updates/`/`Issues/` (ground-truth records pasted in by the project owner —
+  not living docs, not this app's to rewrite). **The one runtime-data-bearing change**:
+  `storage.py`'s DB path default moved from `backend/nesting_pro.db` to
+  `backend/cutoptimizer.db` (env var `NESTING_PRO_DB_PATH` → `CUTOPTIMIZER_DB_PATH`, old var
+  still honored as a fallback) — added a one-time migration (`os.rename` at import time) so a
+  real pre-existing local DB isn't orphaned; verified directly against this session's own real
+  dev DB file (created 2026-09-07, holding real stock boards/presets/settings from pass 30):
+  confirmed it migrated in place, byte-identical, and the old filename no longer exists.
+  `.gitignore`'s entry updated to match. Full backend suite: 156 passed, 5 failed/32 errors —
+  unchanged from before this pass and confirmed unrelated (the already-documented stale
+  `sample_data` golden-XML path issue, "Remaining work" item 5). No frontend logic changed
+  (title/header text only) — `tsc -b`/lint/build not re-run this pass since no `.ts`/`.tsx`
+  logic changed, only string literals.
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
@@ -956,9 +1076,9 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   → `uvicorn api:app --reload --host 127.0.0.1 --port 8000`. `backend/.venv` has the `dev`
   extra installed (`pip install -e ".[dev]"`, now including `pypdf` for PDF-export test
   assertions and `httpx` for FastAPI `TestClient` HTTP tests) — `pytest -q` from `backend/` runs
-  189 tests, all green (once the stale `sample_data` XML path from "Remaining work" #4 is
+  193 tests, all green (once the stale `sample_data` XML path from "Remaining work" #4 is
   worked around — see "Last worked" pass 21). New runtime dependency: a SQLite file at
-  `backend/nesting_pro.db`
+  `backend/cutoptimizer.db`
   (gitignored, auto-created on first request via `storage.get_connection()` — no manual setup
   step, but a fresh clone's first `/stock-boards` or `/settings` call creates it).
 - **Frontend entry point:** `frontend/` (Vite + React + TypeScript), `npm run dev` serves on
@@ -1111,7 +1231,7 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
    exported geometry for the exact reported scenario was verified byte-for-byte against a real
    golden machine-cut workpiece with identical characteristics, and found correct — no bug in
    this app's XML export explains the discrepancy (see pass 16 in "Last worked" above for the
-   full evidence trail). Follow-on discussion (pass 17) noticed nesting-pro's demo layout sat in
+   full evidence trail). Follow-on discussion (pass 17) noticed CutOptimizer's demo layout sat in
    a different board corner than Nanxing's own inbuilt-optimizer layout for a comparable job, and
    added a **"Board corner" dropdown** (`optimizer/placement.py`) so the *exact same* layout can
    be reproduced in any of the 4 corners — the clean way to test whether table position (vacuum-
@@ -1122,7 +1242,7 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
    new corner) that points at the table/machine; if it follows the *file* regardless of corner,
    that reopens the software investigation. `ToolPoint`'s rule is still unknown (defaults to `0`)
    and remains unconfirmed either way. Not something a coding session can do unattended.
-4. **Bug: physical label placeholder position is inconsistent/"off-center" on nesting-pro
+4. **Bug: physical label placeholder position is inconsistent/"off-center" on CutOptimizer
    exports — partially fixed in pass 22, real root cause found in pass 23, tracked as item 1
    above (max priority, set by the project owner).** Reported directly (2026-09-02) via real
    NaccNesting screenshots — "Fin China's own optimization tool places it properly; nesting-
@@ -1288,6 +1408,37 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
     from Fin China's — not verifiable further without either the physical machine's own
     placement-computation logic or a wider set of real photographed examples to correlate
     against. No further action possible from XML inspection alone.
+18. **Joint/global re-optimization — the confirmed remaining gap after pass 29's
+    consolidation pass.** Pass 29 recovered real material (26Y118 22→21 sheets, BEDROOM 3-4
+    70→69) by relocating sparse sheets' parts into other sheets' *existing* leftover space,
+    but directly confirmed this technique's limit against the project owner's own real
+    example: the specific sheet they annotated (37.9% used) still couldn't dissolve — its
+    parts each need >=450mm on their short axis, and the best candidate leftover space
+    elsewhere was 450.5mm, just 0.6mm too narrow. This technique cannot reshape an *already-
+    decided* sheet's own internal arrangement to open up that margin; only genuine joint
+    planning (deciding multiple sheets' part assignments together, not greedily fixing one
+    sheet before ever considering the next) could close gaps this tight. This is the same
+    "cutting-stock/set-covering" undertaking flagged in earlier passes as bigger and less
+    certain than anything shipped so far — not started, and given pass 29 already recovered
+    real, measured value with a much smaller, safer change, still not obviously worth the
+    size of that undertaking without more evidence of how much more it would actually buy.
+19. **New, unexplained real-machine import crash (pass 30, 2026-09-07).** NaccNesting
+    rejected `26Y125_FLOOR 14,15&16`'s exported XML on import with "LabelPosCalc, error code
+    -1, Fincnc.dll call exception error" — sibling XMLs from the same session (6&9, 10&11,
+    24&25) all imported fine. Thoroughly checked and ruled out every mechanism this project
+    has previously touched: malformed XML, duplicate/missing workpieces, part-part and
+    part-oddment overlaps, out-of-board-bounds placements, the known rotated+shifted
+    `EdgeGroup` bug (item 16, doesn't apply to this file's workpieces), and extreme part
+    aspect ratio (identical minimum/maximum ratios present in the sibling files that work).
+    One real lead (negative-dimension `Oddments` — 8 in this file) was checked against real
+    Fin China golden data and found to be their own established convention (28% of all real
+    golden Oddments are negative-dimension too) — retracted, not fixed, same as pass 16's
+    Margin-transpose retraction. No root cause found from static analysis alone. Prepared an
+    empirical bisection instead of guessing further: `results/070920261609/bisect/` splits
+    the failing file at its two material `<Patterns>` blocks into two standalone valid
+    documents, for the project owner to test-import independently and narrow down which half
+    (and, if needed, which sheet within it) actually triggers the crash. Not started: acting
+    on whatever the bisection narrows this down to.
 
 ---
 

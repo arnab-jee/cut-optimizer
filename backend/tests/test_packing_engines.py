@@ -104,13 +104,18 @@ def test_edge_strategy_consolidation_on_a_real_job(nesting_parts, default_margin
     # this). CLAUDE.md pass 28 changed that: the grain-free orientation preference became a
     # hard constraint (minimizing rotation to mitigate a real machine bug unrelated to waste
     # strategy — see nanxing_packing.py's own comment), which removes another placement degree
-    # of freedom "edge" also depends on to consolidate well; measured on this exact job, that
-    # interaction now makes edge *less* consolidated than balanced (0.612 vs 0.668) — a real,
-    # accepted side effect of pass 28's tradeoff, not a regression in "edge" itself. The
-    # mechanism `guillotine_split` uses to consolidate is still directly, deterministically
-    # verified independent of any orientation policy by test_edge_strategy_always_cuts_
-    # vertically above; this test now just locks in the current real measurement so a future
-    # change that shifts it again gets noticed and re-evaluated deliberately, not silently.
+    # of freedom "edge" also depends on to consolidate well; measured right after that pass,
+    # "edge" came out *less* consolidated than "balanced" on this exact job (0.612 vs 0.668,
+    # at 10 sheets). Pass 29's consolidate_sheets() post-processing pass (relocates a sparse
+    # sheet's parts into other sheets' real leftover space when that fully succeeds, dropping
+    # the sheet) recovered a genuine sheet here (10->9) and, as a side effect, pushed "edge"
+    # back ahead of "balanced" again (0.693 vs 0.668) — not because "edge" itself changed, but
+    # because the sheet whose absence changes the denominator was a real, physical
+    # consolidation win. The mechanism `guillotine_split` uses to consolidate within one sheet
+    # is still directly, deterministically verified independent of any of this by
+    # test_edge_strategy_always_cuts_vertically above; this test just locks in the current
+    # real measurement so a future change that shifts it again gets noticed and re-evaluated
+    # deliberately, not silently.
     stock = default_stock_for(nesting_parts)
     balanced = nanxing_optimize(nesting_parts, stock, default_margin, spacing=6.0, waste_strategy="balanced")
     edge = nanxing_optimize(nesting_parts, stock, default_margin, spacing=6.0, waste_strategy="edge")
@@ -122,8 +127,9 @@ def test_edge_strategy_consolidation_on_a_real_job(nesting_parts, default_margin
         largest_per_sheet = sum(max((o.w * o.h for o in s.offcuts), default=0.0) for s in result.sheets)
         return largest_per_sheet / total_area
 
+    assert len(edge.sheets) == 9  # consolidated from 10 pre-pass-29
     assert largest_offcut_fraction(balanced) == pytest.approx(0.668137, abs=1e-4)
-    assert largest_offcut_fraction(edge) == pytest.approx(0.612350, abs=1e-4)
+    assert largest_offcut_fraction(edge) == pytest.approx(0.693459, abs=1e-4)
 
 
 # --- Issues/issues_001.md: grain="length" parts were placed with cutLength forced onto the

@@ -8,7 +8,17 @@ from dataclasses import dataclass
 # Waste Placement default. Auth/tenancy/machine-availability/schema-template renaming are
 # explicitly deferred to a later pass.
 
-DB_PATH = os.environ.get("NESTING_PRO_DB_PATH", os.path.join(os.path.dirname(__file__), "nesting_pro.db"))
+_OLD_DB_PATH = os.path.join(os.path.dirname(__file__), "nesting_pro.db")
+DB_PATH = os.environ.get(
+    "CUTOPTIMIZER_DB_PATH",
+    os.environ.get("NESTING_PRO_DB_PATH", os.path.join(os.path.dirname(__file__), "cutoptimizer.db")),
+)
+
+# App renamed nesting-pro -> CutOptimizer. A real local DB (stock boards, presets, settings)
+# may already exist under the old default filename from before this rename — migrate it in
+# place rather than silently starting a fresh, empty database under the new name.
+if not os.path.exists(DB_PATH) and os.path.exists(_OLD_DB_PATH) and DB_PATH != _OLD_DB_PATH:
+    os.rename(_OLD_DB_PATH, DB_PATH)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS stock_boards (

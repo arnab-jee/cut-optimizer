@@ -1,4 +1,4 @@
-# nesting-pro — Post-M11 Development Roadmap
+# CutOptimizer — Post-M11 Development Roadmap
 
 > Proposed staged plan for the improvements discussed after M11 (FCC XML axis-inversion fix).
 > Phases 1–3 are done (2026-08-14, 2026-08-17 ×2); Phases 4–5 not yet started. For what's

@@ -76,6 +76,34 @@
   before implementing). **Still open**: the stray-placeholder bug's actual mechanism — the
   hard constraint is a mitigation, not a root-cause fix, and will still matter for the 16
   genuinely-unavoidable-rotation parts. See `CLAUDE.md` "Remaining work" items 15-17.
+- [x] **Confirmed on the real machine: label-placeholder bug from pass 28 is fully fixed.**
+  But pass 28's hard rotation constraint dropped average utilization to 63.8% — the project
+  owner shared a real annotated screenshot (three sheets: 57.5%/77.2%/37.9% used) pointing at
+  the cause: `place_parts_on_board` fills sheets greedily and never revisits an earlier one,
+  so parts that would fit into an earlier sheet's leftover space end up stranded on their own
+  sparse sheet instead. Fixed with a new post-processing pass, `consolidate_sheets()`
+  (`nanxing_packing.py`): tries to dissolve the least-full sheet in a group by relocating
+  every one of its parts into other sheets' real leftover space, dropping the sheet only when
+  *all* its parts find a home — never changes any part's orientation, so it can't regress the
+  labeling fix. Real, measured improvement: 26Y118 22→21 sheets (63.8%→66.9%), BEDROOM 3-4
+  70→69. **Honest limit found, not hidden**: the project owner's *exact* annotated sheet
+  still can't dissolve — its parts need ≥450mm on their short axis, the best leftover space
+  elsewhere is 450.5mm, 0.6mm short. This technique only relocates into existing leftover
+  space; it can't reshape an already-decided sheet to open up that margin — closing that
+  needs genuine joint/global re-optimization (a bigger undertaking, tracked separately, not
+  started). Full suite: 193 tests, all green (+4 new). See `CLAUDE.md` "Remaining work" item
+  18 and pass 29.
+- [ ] **New real-machine import crash, not yet root-caused.** NaccNesting rejects
+  `26Y125_FLOOR 14,15&16`'s exported XML on import: "LabelPosCalc, error code -1, Fincnc.dll
+  call exception error." Sibling XMLs from the same session import fine. Investigated
+  thoroughly — malformed XML, duplicate/missing/overlapping workpieces, out-of-bounds
+  placement, the known EdgeGroup bug, and extreme aspect ratios were all checked and ruled
+  out; a negative-dimension-Oddments lead was checked against real Fin China golden data and
+  turned out to be their own normal convention (28% of real golden Oddments are negative too),
+  not a bug. No root cause found yet. Prepared `results/070920261609/bisect/` (the file split
+  by material into two standalone XMLs) for the project owner to test-import on the real
+  machine and narrow down which half triggers it. See `CLAUDE.md` "Remaining work" item 19
+  and pass 30.
 
 
 ## UI/UX Improvements

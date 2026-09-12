@@ -1,4 +1,4 @@
-# nesting-pro — Desktop App Packaging Plan
+# CutOptimizer — Desktop App Packaging Plan
 
 > **Status: planned, not started.** Explicitly deferred until after the current UI/UX fix-and-
 > update pass is done — revisit this file when that work is finished. This plan itself was
@@ -10,7 +10,7 @@
 
 ## 1. Goal
 
-Package nesting-pro as a standalone Windows application that factory-floor machines (Windows
+Package CutOptimizer as a standalone Windows application that factory-floor machines (Windows
 10/11) can run **with no network dependency at all** — no shared backend, no cloud, no LAN/VPN
 reachability requirement. Each install is fully self-contained: its own local optimizer, its own
 local SQLite database (stock boards, presets, settings), runs entirely offline.
@@ -63,12 +63,12 @@ that only exists in dev mode). The plan is to consolidate to **one process**:
   how Fin China's own software just runs.
 - **Data directory handling needs a real fix, not just reusing today's dev behavior.**
   `storage.py`'s `DB_PATH` currently defaults to a path next to `api.py` on disk
-  (`NESTING_PRO_DB_PATH` env var override, otherwise `os.path.dirname(__file__)`) — inside a
+  (`CUTOPTIMIZER_DB_PATH` env var override, otherwise `os.path.dirname(__file__)`) — inside a
   PyInstaller-frozen executable, `__file__`-relative paths behave differently (resources get
   unpacked to a temp `sys._MEIPASS` directory that's wrong for something that must *persist*
   across runs, like the SQLite file). The packaged app needs to resolve its data directory to
   somewhere stable and writable regardless of where the exe is launched from or reinstalled —
-  the standard Windows-appropriate location is something like `%APPDATA%\nesting-pro\`, created
+  the standard Windows-appropriate location is something like `%APPDATA%\CutOptimizer\`, created
   on first run if missing. This is a real code change in `storage.py`, not just a packaging
   concern, and should be one of the first things implemented and tested once this plan is
   picked back up.
