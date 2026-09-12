@@ -297,6 +297,8 @@ function App() {
           </div>
         </div>
       )}
+
+      <footer className="app-footer">Copyright &copy; 2026 ARNIEM. All rights reserved.</footer>
     </div>
   );
 }
