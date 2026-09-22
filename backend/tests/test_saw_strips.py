@@ -125,6 +125,38 @@ def test_a_groups_total_length_spanning_multiple_boards_splits_into_multiple_str
         assert len(parts_in_col) <= 2  # 2x1000mm + kerf fits in ~2420mm; a 3rd would not
 
 
+def test_instances_are_ordered_by_leftover_not_width_so_waste_stays_contiguous():
+    # Real bug (reported via two rendered PDFs, 2026-09-22): a near-full instance sorted by
+    # width alone can land *between* two mostly-empty ones purely because its own width value
+    # happens to fall between theirs, splitting what should be one reusable offcut into two
+    # disconnected scraps on opposite edges of the sheet. Reproduces the exact real scenario:
+    # a 421mm-wide group with three 654mm-long parts (nearly fills the board -- little
+    # leftover) sitting width-wise between a 276mm-wide and a 426mm-wide group, each with a
+    # single short 396.5mm part (mostly empty -- lots of leftover). Sorted by width alone
+    # (426, 421, 276 or its reverse), the full instance would land in the middle; sorted by
+    # leftover, the two empty instances must be adjacent to each other with the full one at
+    # an edge, regardless of which edge. Uses grain="width" (pw = cutLength, deterministic --
+    # see _footprint) so each group's width is pinned directly rather than depending on the
+    # frequency-based grain="none" heuristic tested elsewhere; that heuristic isn't what this
+    # test is about.
+    parts = [
+        _part(cutLength=426.0, cutWidth=396.5, grain="width", id="A"),
+        _part(cutLength=421.0, cutWidth=654.0, grain="width", id="B1"),
+        _part(cutLength=421.0, cutWidth=654.0, grain="width", id="B2"),
+        _part(cutLength=421.0, cutWidth=654.0, grain="width", id="B3"),
+        _part(cutLength=276.0, cutWidth=396.5, grain="width", id="C"),
+    ]
+    sheet, still_remaining = _place_parts_on_board_strips(parts, _BOARD, _MARGIN, 4.0, True, 1)
+    assert still_remaining == []
+    cols = _columns(sheet.placed)
+    assert len(cols) == 3
+    xs_in_order = sorted(cols.keys())
+    widths_in_order = [round(cols[x][0].w, 1) for x in xs_in_order]
+    # The full (421mm) instance must sit at one edge, not sandwiched between the two mostly-
+    # empty ones -- otherwise their leftover regions can't merge into one contiguous area.
+    assert 421.0 in (widths_in_order[0], widths_in_order[-1])
+
+
 def test_part_too_large_for_any_board_is_reported_unplaced():
     parts = [_part(cutLength=5000.0, cutWidth=80.0, id="TOO_BIG")]
     stock = [_BOARD]

@@ -255,6 +255,18 @@ def _place_parts_on_board_strips(
     placed_ids = {part.id for inst in accepted for part, *_ in inst.items}
     still_remaining = [p for p in parts if p.id not in placed_ids]
 
+    # Re-order the *accepted* instances for x-placement by how much leftover length each one
+    # has (which was never a factor in the width-based accept decision above) — fullest first,
+    # emptiest last. Every instance's own leftover sits at the same edge (native y, top of its
+    # stack), so clustering the emptiest instances next to each other merges their leftovers
+    # into one contiguous region instead of scattering them. Real bug this fixes (reported via
+    # two rendered PDFs, 2026-09-22): a near-full instance sorted by width alone can land
+    # *between* two mostly-empty ones purely because its width happens to be a value between
+    # theirs, splitting what should be one reusable offcut into two disconnected, oddly-shaped
+    # scraps on opposite edges of the sheet. Doesn't reduce total leftover (that's fixed by the
+    # parts' own sizes) — only where it ends up relative to the other leftover on the sheet.
+    accepted.sort(key=lambda inst: height - inst.used)
+
     placed_parts: list[PlacedPart] = []
     offcuts: list[Offcut] = []
     x_cursor = 0.0

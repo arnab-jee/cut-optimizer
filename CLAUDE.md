@@ -126,7 +126,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-09-22 — thirty-five passes across eight sessions (this session opened
+- **Last worked:** 2026-09-22 — thirty-six passes across eight sessions (this session opened
   without the direct conversation history for passes 9–18 below — resumed entirely from this
   file, the auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is
   exactly the point of keeping this file current). (1) Applied
@@ -1228,6 +1228,46 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   with the fix; the existing name-based test was renamed/re-commented (its own assertions were
   already name-invariant, using the same name throughout, so it needed no behavior change).
   Full suite green, no other tests depended on the old per-name split. No frontend changes.
+  (36) Real rendered "strips" PDFs (two different materials, same job) showed two related
+  problems the project owner flagged with screenshots and arrows: (1) a visible white gap
+  partway down one strip column, with parts that could obviously fill it sitting in the
+  adjacent column instead; (2) three "2.Drawer Bottom" pieces stacked in a tall middle column,
+  flanked by two short, near-empty columns on either side — "this destroys the entire board,
+  we won't be able to reuse the wastage" — plus a broader ask that strips-mode wastage should
+  end up close to rectangular/square, not L/T-shaped, for reuse. Investigated by decoding the
+  real PDF's raw rectangle coordinates (same technique as pass 33) rather than reasoning from
+  the screenshots alone. Found: the *combined* leftover length for a group split across
+  multiple same-width strip instances is mathematically fixed by the parts' own sizes (packing
+  order can't change the total, confirmed by hand-tracing the exact real numbers) — so item
+  (1)'s "why not move those parts" has no fix at the bin-packing level. But item (2) is a real,
+  fixable bug: `_place_parts_on_board_strips`'s Step 3 placed accepted instances left-to-right
+  sorted by width alone, with zero regard for how much leftover length each one has. When a
+  near-full instance's width happens to fall numerically between two mostly-empty instances'
+  widths, it lands in the middle by pure coincidence, splitting what should be one contiguous
+  reusable offcut into two disconnected scraps on opposite edges — exactly both screenshots
+  (confirmed by direct calculation: the real 421mm/654mm-long instance has only ~446mm
+  leftover; the 276mm and 426mm instances each have ~2019mm, and 421 sits width-wise between
+  276 and 426, so pure width-sort put it in the middle every time).
+
+  **Fix**: after Step 3's width-budget accept/reject decision (unchanged), re-sort just the
+  *accepted* instances by leftover length (`height - inst.used`, fullest first) before
+  assigning x positions — doesn't change which instances got accepted, only where they sit
+  relative to each other. Every instance's own leftover sits at the same edge (all stack from
+  local y=0 upward), so clustering the emptiest instances together merges their leftovers into
+  one contiguous region instead of scattering them. Verified directly on the real reported job:
+  the drawer-bottom sheet's two sparse columns (276mm, 426mm) are now adjacent with the full
+  421mm column pushed to the far edge — regenerated the actual PDF and visually confirmed
+  (`pdftoppm`) the two small scraps merged into one ~702×2019mm rectangular region. The other
+  screenshot's sheet reordered from an arbitrary width-based interleaving to a monotonic
+  leftover staircase (770→497→170mm left to right) — not a single perfect rectangle (3 groups
+  with genuinely different demand-to-capacity ratios can't merge into one in general), but
+  connected and monotonic rather than a full column splitting two empty ones apart. New
+  regression test `test_instances_are_ordered_by_leftover_not_width_so_waste_stays_contiguous`
+  (`test_saw_strips.py`, suite 216→217, uses grain-locked synthetic parts to pin each group's
+  width deterministically rather than depend on the separate frequency-based grouping
+  heuristic) — verified it fails against the pre-fix width-only sort and passes with the fix.
+  Full suite green. No frontend changes — this is purely an internal placement-order change
+  within the existing `_place_parts_on_board_strips` function.
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
@@ -1636,6 +1676,15 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
     this happens. Not attempted this pass (bigger scope, uncertain payoff, and the per-board
     approach already keeps every board individually valid/simple) — a candidate follow-up if a
     real job shows this being a recurring, material-relevant problem rather than a one-off.
+    **Pass 36 fixed a related but distinct issue** — a near-full instance could land width-wise
+    *between* two mostly-empty ones purely by width-sort coincidence, splitting one reusable
+    offcut into two disconnected scraps (see that pass for the full writeup) — by sorting
+    accepted instances by leftover length before x-placement instead of by width. That fix is
+    about *where* leftover ends up relative to other leftover on the same sheet; it doesn't
+    (and can't) reduce a single group's *total* leftover when split across multiple same-width
+    instances, which pass 36 confirmed by hand-trace is mathematically fixed by the parts'
+    own sizes regardless of packing order — still an open, unsolved sub-problem, distinct from
+    both this item's tail-sheet-sparsity issue and pass 36's now-fixed ordering issue.
 
 ---
 
