@@ -50,6 +50,67 @@ def test_merge_free_rects_leaves_non_adjacent_rects_alone(mod):
     assert len(merged) == 2
 
 
+# Real bug (reported via a rendered panel-saw PDF showing a large, obviously-unused void):
+# two free rectangles born from placing parts of very slightly different real-world widths
+# (e.g. 702mm vs 701.8mm sharing the same kerf) land with a fractional-mm offset between their
+# edges and, under the old exact (EPS=1e-6) match, could never merge — permanently stranding
+# real board area as an island too small for anything else to use, even though it was genuinely
+# contiguous with a much larger neighboring free region for the rest of that sheet's packing.
+
+@pytest.mark.parametrize("mod", MODULES)
+def test_merge_free_rects_combines_rects_with_a_sub_mm_edge_mismatch(mod):
+    # b's left edge (0.3) is off from a's (0.0) by less than MERGE_EPS but far more than the
+    # old exact-float EPS — this is the real-world 702-vs-701.8mm pattern in miniature.
+    a = mod.Rectangle(0, 0, 100, 50)
+    b = mod.Rectangle(0.3, 50, 99.7, 30)
+    merged = mod.merge_free_rects([a, b])
+    assert len(merged) == 1
+    # Conservative intersection, never the union: b's slightly-narrower extent wins.
+    assert merged[0] == mod.Rectangle(0.3, 0, 99.7, 80)
+
+
+@pytest.mark.parametrize("mod", MODULES)
+def test_merge_free_rects_still_refuses_edges_that_are_genuinely_different(mod):
+    # A 2mm mismatch is well beyond MERGE_EPS (0.5mm) and must not merge — this isn't just
+    # "any small number merges," it's specifically tolerant of realistic CSV/kerf noise.
+    a = mod.Rectangle(0, 0, 100, 50)
+    b = mod.Rectangle(2.0, 50, 98.0, 30)
+    merged = mod.merge_free_rects([a, b])
+    assert len(merged) == 2
+
+
+def test_merge_free_rects_fix_recovers_a_real_stranded_island_on_a_real_job():
+    # Direct reproduction of a real job (26Y130, material CC_HDH_6_8134_OS_ANY_CL): a 702x582mm
+    # part shares a sheet with four 701.8mm-wide parts (472/472/572/572). The 0.2mm width
+    # difference (both get the same 4mm kerf) used to leave a 494x586mm free rectangle
+    # permanently unmerged with the growing free strip directly above it, since nothing else on
+    # the sheet was short enough to fit that stranded 586mm-tall island alone. A 7th part
+    # (900x480) needs more height than that island alone offers but fits comfortably once the
+    # island merges with its taller neighbor — so it's placeable on this single board only with
+    # the fix; before the fix it doesn't fit anywhere on this board and the optimizer would
+    # have opened a second sheet for it (matching the real job's actual, measured improvement:
+    # this exact part combination dropped from 8 sheets to 6 for this material after the fix).
+    # E's area is deliberately smaller than all 6 other parts so it sorts (by -area) after them,
+    # preserving the exact same placement order/free-rect trace for A-D that produced the real
+    # stranded island in the first place.
+    parts = [
+        _part(702.0, 582.0, id="A"),
+        _part(701.8, 572.0, id="B1"),
+        _part(701.8, 572.0, id="B2"),
+        _part(701.8, 472.0, id="C1"),
+        _part(701.8, 472.0, id="C2"),
+        _part(701.8, 432.0, id="D"),
+        _part(750.0, 350.0, id="E"),
+    ]
+    board = StockBoard(material="MAT", length=2440, width=1220, thickness=18.0, grain="none")
+    margin = Margin(top=10, right=10, bottom=10, left=10)
+    result = saw_optimize(parts, [board], margin, kerf=4.0, allow_rotation=True, waste_strategy="balanced")
+    assert result.unplaced == []
+    assert len(result.sheets) == 1
+    assert overlapping_pairs(result.sheets[0].placed) == 0
+    assert is_guillotine_cuttable(result.sheets[0].placed)
+
+
 @pytest.mark.parametrize("mod", MODULES)
 def test_edge_strategy_always_cuts_vertically(mod):
     # "edge" must ignore the shorter-leftover-axis rule and always keep the right-hand child

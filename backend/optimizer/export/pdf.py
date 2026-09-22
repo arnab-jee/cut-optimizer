@@ -315,6 +315,7 @@ def _draw_grain_box(canvas: Canvas, grain: str, x0: float, x1: float, y0: float,
 def _draw_main_header(
     canvas: Canvas, sheet: Sheet, layout_index: int, layout_total: int, occurrence: int,
     job_stats: dict, x0: float, x1: float, top_y: float,
+    client_name: str = "", order_no: str = "",
 ) -> float:
     canvas.setFillColorRGB(0, 0, 0)
     canvas.setFont("Helvetica-Bold", 16)
@@ -334,22 +335,30 @@ def _draw_main_header(
     col3 = x0 + (x1 - x0) * 0.68
     row_h = 15.0
     canvas.setFont("Helvetica", 8)
-    # Client Name/Job Reference/Phone/Fax/Cell No have no data source in this app (contact-info
-    # fields the reference itself also leaves blank in every sample page) — labels only, no
-    # fabricated values. Date Required is likewise left blank (no "requested-by" concept exists
-    # here); the generation timestamp is in the page footer instead.
+    # Client Name/Job Reference come from the same job-level clientNameOverride/orderNoOverride
+    # the labels export already uses (Panel Saw CSVs have no Client/Project column at all, so
+    # these are manual entries, not derived from part data) — left blank when not provided,
+    # same "no fabricated values" rule as before. Phone/Fax/Cell No still have no data source
+    # anywhere in this app (contact-info fields the reference itself also leaves blank in every
+    # sample page) — labels only. Date Required is likewise left blank (no "requested-by"
+    # concept exists here); the generation timestamp is in the page footer instead.
     rows = [
-        ("Client Name :", "Job Reference :"),
+        (f"Client Name : {client_name}" if client_name else "Client Name :", f"Job Reference : {order_no}" if order_no else "Job Reference :"),
         ("Date Required :", f"Sheets of this Material : {job_stats['sheets_of_material']}", f"Job Sheets : {job_stats['job_sheets']}"),
         ("Phone Number :", f"Sheet Panels : {len(sheet.placed)}", f"Job Panels : {job_stats['job_panels']}"),
         ("Fax Number :", f"Layout Wastage : {100 - sheet.utilizationPct:.2f}%", f"Job Wastage : {job_stats['job_wastage']:.2f}%"),
         ("Cell No :", f"Sheet Cut Length : {fmt_num(job_stats['sheet_cut_length'])} mm", f"Job Cut Length : {fmt_num(job_stats['job_cut_length'])} mm"),
     ]
+    col_widths = [col2 - col1 - PAD, col3 - col2 - PAD, x1 - col3]
+    cols = [col1, col2, col3]
+    # Client Name/Job Reference are free-text user input (unlike every other cell here, which is
+    # always a short label or computed number) and could overflow their column — shrink-to-fit
+    # guards every cell uniformly rather than special-casing just those two.
     for row in rows:
-        canvas.drawString(col1, y, row[0])
-        canvas.drawString(col2, y, row[1])
-        if len(row) > 2:
-            canvas.drawString(col3, y, row[2])
+        for i, text in enumerate(row):
+            size = _shrink_to_fit(canvas, text, col_widths[i], 8.0, min_size=5.0, font="Helvetica")
+            canvas.setFont("Helvetica", size)
+            canvas.drawString(cols[i], y, text)
         y -= row_h
     return y
 
@@ -402,8 +411,7 @@ def _draw_board_drawing(
         canvas.setStrokeColorRGB(*PART_STROKE)
         canvas.setLineWidth(0.75)
         canvas.rect(x, y, w, h, fill=1, stroke=1)
-        length_mm, width_mm = _nominal_dims(part)
-        _draw_part_edge_dims(canvas, x, y, w, h, width_mm, length_mm)
+        _draw_part_edge_dims(canvas, x, y, w, h, part.w, part.h)
         symbol = symbol_by_index[i]
         _draw_part_symbol_label(canvas, x, y, w, h, f"{symbol}.{part.name}")
 
@@ -439,6 +447,7 @@ def _draw_footer(canvas: Canvas, x0: float, x1: float, y0: float, y1: float) -> 
 
 def render_layout_pdf(
     result: OptResult, margin: Margin | None = None, output_path: str | None = None, show_cut_lines: bool = False,
+    client_name_override: str = "", order_no_override: str = "",
 ) -> bytes:
     # margin defaults to zero rather than being required: only the cut-line overlay needs it
     # (saw jobs only — result.cuts is always empty for Nanxing, see optimizer/nanxing.py), and
@@ -495,6 +504,7 @@ def render_layout_pdf(
         header_bottom = _draw_main_header(
             canvas, sheet, layout_index, layout_total, occurrence, job_stats,
             sidebar_x1 + PAD, frame_x1 - PAD, content_y1,
+            client_name_override, order_no_override,
         )
         canvas.setStrokeColorRGB(0.6, 0.6, 0.6)
         canvas.setLineWidth(0.4)

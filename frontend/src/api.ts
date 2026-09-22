@@ -135,8 +135,13 @@ function timestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 }
 
-export async function downloadPdf(request: OptRequest, projectName: string): Promise<void> {
-  const blob = await fetchExportBlob("/export/pdf", request);
+export async function downloadPdf(
+  request: OptRequest,
+  overrides: { clientNameOverride: string; orderNoOverride: string },
+  projectName: string,
+): Promise<void> {
+  const res = await postJson("/export/pdf", { ...request, ...overrides });
+  const blob = await res.blob();
   triggerDownload(blob, `${projectName}-${timestamp()}.pdf`);
 }
 

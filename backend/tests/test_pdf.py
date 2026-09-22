@@ -59,6 +59,25 @@ def test_page_text_includes_header_and_stats(saw_parts, default_margin):
     assert "Sheet Cut Length :" in text
 
 
+def test_client_name_and_order_no_render_when_provided(saw_parts, default_margin):
+    result = _saw_result(saw_parts, default_margin)
+    pdf_bytes = render_layout_pdf(result, client_name_override="Acme Furniture", order_no_override="26Y130T3F14B1")
+    text = PdfReader(BytesIO(pdf_bytes)).pages[0].extract_text()
+    assert "Client Name : Acme Furniture" in text
+    assert "Job Reference : 26Y130T3F14B1" in text
+
+
+def test_client_name_and_order_no_blank_by_default(saw_parts, default_margin):
+    # No fabricated values -- same rule as every other contact-info field on this page (M3).
+    # Checked against the raw content stream rather than extract_text(): with no override, the
+    # label is drawn as its own literal "(Client Name :)" Tj string with nothing appended.
+    result = _saw_result(saw_parts, default_margin)
+    pdf_bytes = render_layout_pdf(result)
+    content = bytes(PdfReader(BytesIO(pdf_bytes)).pages[0].get_contents().get_data()).decode("latin-1")
+    assert "(Client Name :) Tj" in content
+    assert "(Job Reference :) Tj" in content
+
+
 def test_empty_result_renders_zero_pages():
     pdf_bytes = render_layout_pdf(OptResult(sheets=[], unplaced=[]))
     reader = PdfReader(BytesIO(pdf_bytes))
@@ -112,7 +131,8 @@ def test_nominal_dims_recovers_length_grain_natural_pose():
     # Issues/issues_001.md fix: a grain="length" part's natural (rotated=False) pose has
     # cutWidth on local x (w) and cutLength on local y (h) — the opposite pairing from
     # grain="none"/"width" parts. _nominal_dims must be grain-aware to still recover the true
-    # (cutLength, cutWidth) for the cutting list / edge-dimension labels.
+    # (cutLength, cutWidth) for the cutting list, which groups/reports parts by their
+    # orientation-independent nominal size regardless of how any one instance got placed.
     part = _part(name="X", w=556.4, h=1323.4, rotated=False, grain="length")
     length, width = _nominal_dims(part)
     assert (length, width) == (1323.4, 556.4)
@@ -122,6 +142,34 @@ def test_nominal_dims_unaffected_for_width_and_none_grain():
     for grain in ("width", "none"):
         part = _part(name="X", w=1323.4, h=556.4, rotated=False, grain=grain)
         assert _nominal_dims(part) == (1323.4, 556.4)
+
+
+def test_edge_dim_labels_match_actual_placed_footprint_not_nominal_swap():
+    # Real bug (reported via a rendered PDF, sheet with two identical grain="none" parts
+    # placed at different rotations): the on-box edge labels must always describe the box as
+    # actually drawn (part.w along the top, part.h down the side), never the orientation-
+    # independent nominal (cutLength, cutWidth) pair _cutting_list uses. Using _nominal_dims
+    # here used to get this backwards for exactly one of the two rotation states per grain,
+    # since _nominal_dims intentionally normalizes away rotation while the drawn box does not.
+    # w != h and rotated=False, grain="none" is the specific case that was mislabeled. (Large
+    # enough that both edge labels clear _draw_part_edge_dims's own minimum-size guard once
+    # scaled down to fit the page.)
+    part = _part(name="X", x=0.0, y=0.0, w=800.0, h=400.0, rotated=False, grain="none")
+    sheet = _sheet(placed=[part])
+    result = OptResult(sheets=[sheet], unplaced=[])
+    pdf_bytes = render_layout_pdf(result)
+    content = bytes(PdfReader(BytesIO(pdf_bytes)).pages[0].get_contents().get_data()).decode("latin-1")
+
+    rect_idx = content.index("re B*")
+    top_label_idx = content.index("(800 mm)", rect_idx)
+    side_label_idx = content.index("(400 mm)", rect_idx)
+    # The top label (spanning the box's actual width) is drawn as a plain, unrotated Tj
+    # right after the rect; the side label is drawn inside a saveState/rotate/restoreState
+    # block ("q ... Q") — so whichever text sits outside that block is the top label.
+    rotate_block_start = content.index(" cm\n", rect_idx)
+    rotate_block_end = content.index("Q", rotate_block_start)
+    assert not (rotate_block_start < top_label_idx < rotate_block_end)
+    assert rotate_block_start < side_label_idx < rotate_block_end
 
 
 def test_grain_direction_mapping():

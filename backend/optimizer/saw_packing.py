@@ -11,6 +11,15 @@ from .model import Margin, Part, PlacedPart, Sheet, StockBoard, Offcut, WasteStr
 
 EPS = 1e-6
 
+# Tolerance for treating two free rectangles as sharing an edge in merge_free_rects. Real CSV
+# parts that are meant to sit in the "same lane" can differ by a fraction of a mm (e.g. 702mm vs
+# 701.8mm) while getting the same kerf/gap — under the old exact (EPS) match, their leftover
+# strips landed at x=706 vs x=705.8 and could never merge, permanently stranding the shorter
+# strip as an unusably small island for the rest of that sheet. 0.5mm comfortably covers realistic
+# CSV/rounding noise while staying far below any meaningful cut precision, so it won't merge two
+# genuinely different lanes.
+MERGE_EPS = 0.5
+
 
 @dataclass
 class Rectangle:
@@ -69,7 +78,15 @@ def merge_free_rects(rects: list[Rectangle]) -> list[Rectangle]:
     rectangle. guillotine_split alone can leave two freshly-created (or older) free
     rectangles sitting flush against each other — merging them keeps wastage consolidated
     into fewer, larger regions instead of staying fragmented, independent of which
-    waste_strategy produced them."""
+    waste_strategy produced them.
+
+    Edges are matched within MERGE_EPS rather than requiring an exact float match (see that
+    constant's own comment for why real data needs this). When two candidates' matching edges
+    are close but not bit-identical, the merged rectangle takes the *intersection* of their
+    extents along that shared axis (never the union) — this is always safe, since both source
+    rectangles were already proven free, so anything inside both of them is guaranteed free
+    too; merging can only ever give up a sliver of claimed space, never invent any.
+    """
     rects = list(rects)
     merged = True
     while merged:
@@ -78,25 +95,29 @@ def merge_free_rects(rects: list[Rectangle]) -> list[Rectangle]:
             a = rects[i]
             for j in range(i + 1, len(rects)):
                 b = rects[j]
-                if abs(a.x - b.x) < EPS and abs(a.w - b.w) < EPS:
-                    if abs((a.y + a.h) - b.y) < EPS:
-                        rects[i] = Rectangle(a.x, a.y, a.w, a.h + b.h)
+                if abs(a.x - b.x) < MERGE_EPS and abs(a.w - b.w) < MERGE_EPS:
+                    mx = max(a.x, b.x)
+                    mw = min(a.x + a.w, b.x + b.w) - mx
+                    if abs((a.y + a.h) - b.y) < MERGE_EPS:
+                        rects[i] = Rectangle(mx, a.y, mw, a.h + b.h)
                         rects.pop(j)
                         merged = True
                         break
-                    if abs((b.y + b.h) - a.y) < EPS:
-                        rects[i] = Rectangle(a.x, b.y, a.w, a.h + b.h)
+                    if abs((b.y + b.h) - a.y) < MERGE_EPS:
+                        rects[i] = Rectangle(mx, b.y, mw, a.h + b.h)
                         rects.pop(j)
                         merged = True
                         break
-                if abs(a.y - b.y) < EPS and abs(a.h - b.h) < EPS:
-                    if abs((a.x + a.w) - b.x) < EPS:
-                        rects[i] = Rectangle(a.x, a.y, a.w + b.w, a.h)
+                if abs(a.y - b.y) < MERGE_EPS and abs(a.h - b.h) < MERGE_EPS:
+                    my = max(a.y, b.y)
+                    mh = min(a.y + a.h, b.y + b.h) - my
+                    if abs((a.x + a.w) - b.x) < MERGE_EPS:
+                        rects[i] = Rectangle(a.x, my, a.w + b.w, mh)
                         rects.pop(j)
                         merged = True
                         break
-                    if abs((b.x + b.w) - a.x) < EPS:
-                        rects[i] = Rectangle(b.x, a.y, a.w + b.w, a.h)
+                    if abs((b.x + b.w) - a.x) < MERGE_EPS:
+                        rects[i] = Rectangle(b.x, my, a.w + b.w, mh)
                         rects.pop(j)
                         merged = True
                         break

@@ -373,7 +373,11 @@ def export_pdf(request: dict = Body(...)) -> Response:
         else:
             result = nanxing_optimize(parts, stock, margin, spacing=request.get("partSpacing", request.get("toolDiameter", 6.0)), waste_strategy=waste_strategy, placement_corner=placement_corner, allow_rotation=request.get("allowRotation", True))
         show_cut_lines = request.get("showCutLines", False)
-        pdf_data = render_layout_pdf(result, margin, show_cut_lines=show_cut_lines)
+        pdf_data = render_layout_pdf(
+            result, margin, show_cut_lines=show_cut_lines,
+            client_name_override=request.get("clientNameOverride", ""),
+            order_no_override=request.get("orderNoOverride", ""),
+        )
         return Response(content=pdf_data, media_type="application/pdf")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=[str(exc)])

@@ -126,7 +126,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-09-07 — thirty passes across seven sessions (this session opened
+- **Last worked:** 2026-09-22 — thirty-three passes across eight sessions (this session opened
   without the direct conversation history for passes 9–18 below — resumed entirely from this
   file, the auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is
   exactly the point of keeping this file current). (1) Applied
@@ -1077,6 +1077,67 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   cut-optimizer`) — left pass 31's own changelog sentence above (in this file) untouched, since
   it accurately describes what pass 31 deliberately did *not* do at the time, and rewriting past
   narrative to match a later decision would misrepresent the history. No code changes.
+  (33) The project owner flagged two real rendered-PDF problems, both found via direct
+  investigation of actual output rather than guesswork. **First**, a real panel-saw layout PDF
+  showed two identical-size "3.Back Panel" instances rendered as visually different shapes, and
+  two differently-sized panels ("2.Back Panel" at 572mm, "3.Back Panel" at 472mm) rendered as
+  visually similar shapes. Decoded the PDF's own raw content-stream rectangle coordinates
+  (`pypdf`) and cross-referenced against the source CSV: the *boxes* were correct (the packer
+  legitimately placed the two identical parts in different rotations to fit different leftover
+  space) — but the printed on-box dimension labels for the box rotated the "other" way were
+  backwards, printing (e.g.) "472 mm" along an edge that was actually 701.8mm. Root cause:
+  `optimizer/export/pdf.py`'s `_draw_board_drawing` derived the edge labels via `_nominal_dims()`
+  — a helper meant only for the sidebar's orientation-independent Cutting List — instead of just
+  using the part's own current `part.w`/`part.h`, which already exactly match the drawn box
+  regardless of rotation. Fixed by passing `part.w`/`part.h` directly
+  (`optimizer/export/pdf.py`); `_nominal_dims()` itself is untouched and still correctly used by
+  `_cutting_list()`. New regression test in `test_pdf.py` renders a real mismatched-orientation
+  case and inspects the raw content stream to confirm the top label matches the box's actual
+  drawn width and the side label its actual drawn height — verified it fails against the
+  pre-fix code (reproducing the exact swap) and passes with the fix.
+  **Second**, a follow-up real PDF (same job, dimension labels now confirmed correct) showed an
+  obviously-unused rectangular void on one sheet, with the project owner asking why parts
+  weren't moved into it. Traced this by reproducing the exact sheet through the real packer
+  (`optimizer/saw_packing.py`) with matching real parameters (margin=10mm, kerf=4mm,
+  waste_strategy="balanced", placement_corner="top-right", confirmed by sweeping parameter
+  combinations until the packer's raw output coordinates matched the PDF's decoded rectangles
+  exactly) and instrumenting the free-rectangle trace directly. Root cause: a 702mm-wide part
+  and several 701.8mm-wide parts — genuinely different real CSV values, 0.2mm apart — sharing
+  the same 4mm kerf produced free-rectangle splits whose edges landed at x=706 and x=705.8
+  respectively. `merge_free_rects()`'s edge-matching required exact float equality (`EPS=1e-6`),
+  so these two free rectangles — genuinely adjacent, part of the same physical lane — could
+  never merge; the shorter one (494×586mm) was permanently stranded as an island too small for
+  any of this job's remaining 701.8mm-long parts, since nothing else on the sheet had an edge
+  under 701.8mm. This is a real defect in the shared free-rectangle engine, present in both
+  duplicated copies (`optimizer/saw_packing.py` and `optimizer/nanxing_packing.py` — same
+  "un-shared but kept in parity" pattern as every prior bug fix to this pair, see M2/M10/etc.).
+  Fixed by widening the merge tolerance to a new `MERGE_EPS = 0.5` (comfortably covers realistic
+  CSV/kerf sub-mm noise, far below any meaningful cut precision) and, critically, merging to the
+  *intersection* of the two rectangles' matching extents rather than blindly unioning them — this
+  keeps every merge provably safe (a merged region can only ever be a subset of two already-
+  proven-free rectangles, never claim occupied space) regardless of how large the mismatch being
+  tolerated is. Verified on the real job (`results/260920261222/`): sheets for the affected
+  material dropped from **8 to 6** (eliminating an almost-empty final board that previously held
+  just 1 part at 10.4% utilization), and the specific sheet the project owner screenshotted went
+  from 6 parts/74.4% utilization to **7 parts/85.4% utilization** — regenerated and visually
+  confirmed via `pdftoppm` that the void is gone. Scanned every sheet in the same job afterward
+  for any other near-miss unmerged pair (found none) and confirmed no HTML/geometry regressions:
+  full relevant suite green (packing, placement, PDF, guillotine, nanxing, consolidation, API —
+  108 tests). New tests in `test_packing_engines.py`: two `merge_free_rects` unit tests
+  (parametrized across both packer modules) proving a sub-mm mismatch now merges via intersection
+  and a genuinely-different (2mm) mismatch still correctly refuses to merge, plus a real-job
+  integration reproduction (the exact 702/701.8mm part combination, plus a 7th part sized so it
+  only fits once the previously-stranded island is reclaimed) asserting all 7 parts now fit one
+  board — verified all three fail against the pre-fix code and pass with the fix restored.
+  **Also investigated, not a bug:** a different sheet in the same job (1082mm/702mm-wide parts,
+  unrelated dimensions) still shows a smaller leftover void after the fix. Checked directly
+  whether any part of that material could geometrically fit it (none can, in either orientation)
+  and scanned for any other unmerged near-miss pair in that job (none found) — this residual gap
+  is the already-documented "Remaining work" item 18 (greedy single-sheet-at-a-time packing, no
+  cross-sheet consolidation) rather than a new bug: `consolidate_sheets()` (pass 29) is wired
+  into `nanxing.py` only, never into `guillotine.py`/the panel saw path — extending it there is a
+  real, scoped follow-up candidate, not started this pass (see updated item 18 below). No
+  frontend changes either fix.
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
@@ -1443,6 +1504,16 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
     certain than anything shipped so far — not started, and given pass 29 already recovered
     real, measured value with a much smaller, safer change, still not obviously worth the
     size of that undertaking without more evidence of how much more it would actually buy.
+    **Smaller, more tractable sub-gap found in pass 33**, worth distinguishing from the full
+    joint-re-optimization undertaking above: pass 29's own `consolidate_sheets()` (the
+    "dissolve a sparse sheet into other sheets' existing leftover space" pass, much cheaper
+    than genuine joint planning) is wired into `nanxing.py` only — `guillotine.py`/the panel
+    saw path has no cross-sheet consolidation at all. Confirmed directly on a real job
+    (26Y130) that a leftover void on one saw sheet is genuinely unfillable *from parts on that
+    sheet's own material group as currently split across sheets* — not obviously fixable by
+    `merge_free_rects` or any single-sheet change — but extending the already-shipped,
+    already-tested `consolidate_sheets()` mechanism to the saw optimizer is a much smaller,
+    lower-risk ask than full joint re-optimization and hasn't been evaluated on its own merits.
 19. **New, unexplained real-machine import crash (pass 30, 2026-09-07).** NaccNesting
     rejected `26Y125_FLOOR 14,15&16`'s exported XML on import with "LabelPosCalc, error code
     -1, Fincnc.dll call exception error" — sibling XMLs from the same session (6&9, 10&11,

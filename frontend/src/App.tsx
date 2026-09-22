@@ -183,7 +183,7 @@ function App() {
   async function handleDownload(kind: "pdf" | "xml" | "labels") {
     setDownloadErrors([]);
     try {
-      if (kind === "pdf") await downloadPdf(currentRequest(), projectName);
+      if (kind === "pdf") await downloadPdf(currentRequest(), { clientNameOverride, orderNoOverride }, projectName);
       else if (kind === "xml") await downloadXml(currentRequest(), projectName);
       else await downloadLabels(currentRequest(), labelSettings, { clientNameOverride, orderNoOverride }, projectName);
     } catch (e) {
