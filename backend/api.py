@@ -8,6 +8,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
 
 import storage
+from optimizer.export.labels import LabelSettings, render_labels_pdf
 from optimizer.export.pdf import render_layout_pdf
 from optimizer.export.xml import generate_fcc_xml
 from optimizer.guillotine import optimize as saw_optimize
@@ -105,7 +106,10 @@ def delete_stock_board(board_id: int, db: sqlite3.Connection = Depends(get_db)) 
 
 @app.get("/settings")
 def get_settings(db: sqlite3.Connection = Depends(get_db)) -> dict:
-    return {"wasteStrategyDefault": storage.get_waste_strategy_default(db)}
+    return {
+        "wasteStrategyDefault": storage.get_waste_strategy_default(db),
+        "defaultLabelSettingsId": storage.get_default_label_settings_id(db),
+    }
 
 
 @app.put("/settings")
@@ -114,6 +118,11 @@ def update_settings(payload: dict = Body(...), db: sqlite3.Connection = Depends(
     if "wasteStrategyDefault" in payload:
         try:
             result["wasteStrategyDefault"] = storage.set_waste_strategy_default(db, payload["wasteStrategyDefault"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=[str(exc)])
+    if "defaultLabelSettingsId" in payload:
+        try:
+            result["defaultLabelSettingsId"] = storage.set_default_label_settings_id(db, payload["defaultLabelSettingsId"])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=[str(exc)])
     return result
@@ -182,6 +191,83 @@ def update_preset(preset_id: int, payload: dict = Body(...), db: sqlite3.Connect
 def delete_preset(preset_id: int, db: sqlite3.Connection = Depends(get_db)) -> dict:
     if not storage.delete_preset(db, preset_id):
         raise HTTPException(status_code=404, detail=[f"preset {preset_id} not found"])
+    return {"deleted": True}
+
+
+# Label printing: named page/label-size/toggle bundles, same flat-DB-column <-> nested-JSON
+# reshape pattern as presets (see _preset_to_dict/_preset_kwargs_from_payload above) — here the
+# JSON contract is already flat (no nested sub-object like `margin`), so the two helpers are
+# thinner, but kept for the same reason: one place where the DB shape and the wire shape meet.
+def _label_settings_to_dict(s: storage.PersistedLabelSettings) -> dict:
+    return {
+        "id": s.id,
+        "name": s.name,
+        "pageType": s.pageType,
+        "pageWidth": s.pageWidth,
+        "pageHeight": s.pageHeight,
+        "labelWidth": s.labelWidth,
+        "labelHeight": s.labelHeight,
+        "marginTop": s.marginTop,
+        "marginRight": s.marginRight,
+        "marginBottom": s.marginBottom,
+        "marginLeft": s.marginLeft,
+        "gapX": s.gapX,
+        "gapY": s.gapY,
+        "showQrCode": s.showQrCode,
+        "showBarcode": s.showBarcode,
+        "showCornerMarks": s.showCornerMarks,
+    }
+
+
+def _label_settings_kwargs_from_payload(payload: dict) -> dict:
+    return {
+        "name": payload["name"],
+        "page_type": payload["pageType"],
+        "page_width": float(payload["pageWidth"]),
+        "page_height": float(payload["pageHeight"]),
+        "label_width": float(payload["labelWidth"]),
+        "label_height": float(payload["labelHeight"]),
+        "margin_top": float(payload.get("marginTop", 0.0)),
+        "margin_right": float(payload.get("marginRight", 0.0)),
+        "margin_bottom": float(payload.get("marginBottom", 0.0)),
+        "margin_left": float(payload.get("marginLeft", 0.0)),
+        "gap_x": float(payload.get("gapX", 0.0)),
+        "gap_y": float(payload.get("gapY", 0.0)),
+        "show_qr_code": bool(payload.get("showQrCode", True)),
+        "show_barcode": bool(payload.get("showBarcode", False)),
+        "show_corner_marks": bool(payload.get("showCornerMarks", True)),
+    }
+
+
+@app.get("/label-settings")
+def list_label_settings(db: sqlite3.Connection = Depends(get_db)) -> list[dict]:
+    return [_label_settings_to_dict(s) for s in storage.list_label_settings(db)]
+
+
+@app.post("/label-settings")
+def create_label_settings(payload: dict = Body(...), db: sqlite3.Connection = Depends(get_db)) -> dict:
+    try:
+        settings = storage.create_label_settings(db, **_label_settings_kwargs_from_payload(payload))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=[str(exc)])
+    return _label_settings_to_dict(settings)
+
+
+@app.put("/label-settings/{settings_id}")
+def update_label_settings(settings_id: int, payload: dict = Body(...), db: sqlite3.Connection = Depends(get_db)) -> dict:
+    try:
+        settings = storage.update_label_settings(db, settings_id, **_label_settings_kwargs_from_payload(payload))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=[str(exc)])
+    if settings is None:
+        raise HTTPException(status_code=404, detail=[f"label settings {settings_id} not found"])
+    return _label_settings_to_dict(settings)
+
+
+@app.delete("/label-settings/{settings_id}")
+def delete_label_settings(settings_id: int, db: sqlite3.Connection = Depends(get_db)) -> dict:
+    if not storage.delete_label_settings(db, settings_id):
+        raise HTTPException(status_code=404, detail=[f"label settings {settings_id} not found"])
     return {"deleted": True}
 
 @app.post("/parse")
@@ -309,5 +395,52 @@ def export_xml(request: dict = Body(...)) -> Response:
             part_spacing=request.get("partSpacing", 6.0),
         )
         return Response(content=xml_data, media_type="application/xml")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=[str(exc)])
+
+
+def _label_settings_from_payload(payload: dict) -> LabelSettings:
+    # Falls back to storage.DEFAULT_LABEL_SETTINGS (same built-in A4-sheet default the frontend
+    # starts with before any settings are saved) for any field the caller omits, rather than
+    # requiring the full object on every /export/labels call.
+    defaults = storage.DEFAULT_LABEL_SETTINGS
+    return LabelSettings(
+        pageType=payload.get("pageType", defaults["pageType"]),
+        pageWidth=float(payload.get("pageWidth", defaults["pageWidth"])),
+        pageHeight=float(payload.get("pageHeight", defaults["pageHeight"])),
+        labelWidth=float(payload.get("labelWidth", defaults["labelWidth"])),
+        labelHeight=float(payload.get("labelHeight", defaults["labelHeight"])),
+        marginTop=float(payload.get("marginTop", defaults["marginTop"])),
+        marginRight=float(payload.get("marginRight", defaults["marginRight"])),
+        marginBottom=float(payload.get("marginBottom", defaults["marginBottom"])),
+        marginLeft=float(payload.get("marginLeft", defaults["marginLeft"])),
+        gapX=float(payload.get("gapX", defaults["gapX"])),
+        gapY=float(payload.get("gapY", defaults["gapY"])),
+        showQrCode=bool(payload.get("showQrCode", defaults["showQrCode"])),
+        showBarcode=bool(payload.get("showBarcode", defaults["showBarcode"])),
+        showCornerMarks=bool(payload.get("showCornerMarks", defaults["showCornerMarks"])),
+    )
+
+
+@app.post("/export/labels")
+def export_labels(request: dict = Body(...)) -> Response:
+    try:
+        margin = Margin(**request.get("margin", {}))
+        stock = [StockBoard(**s) for s in request.get("stock", [])]
+        parts = [Part(**part) for part in request.get("parts", [])]
+        waste_strategy = request.get("wasteStrategy", "balanced")
+        placement_corner = request.get("placementCorner", UI_DEFAULT_PLACEMENT_CORNER)
+        if request.get("target") == "saw":
+            result = saw_optimize(parts, stock, margin, kerf=request.get("kerf", 0.0), allow_rotation=request.get("allowRotation", True), waste_strategy=waste_strategy, placement_corner=placement_corner)
+        else:
+            result = nanxing_optimize(parts, stock, margin, spacing=request.get("partSpacing", request.get("toolDiameter", 6.0)), waste_strategy=waste_strategy, placement_corner=placement_corner, allow_rotation=request.get("allowRotation", True))
+        parts_by_id = {part.id: part for part in parts}
+        label_settings = _label_settings_from_payload(request.get("labelSettings", {}))
+        pdf_data = render_labels_pdf(
+            result, parts_by_id, label_settings,
+            client_name_override=request.get("clientNameOverride", ""),
+            order_no_override=request.get("orderNoOverride", ""),
+        )
+        return Response(content=pdf_data, media_type="application/pdf")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=[str(exc)])

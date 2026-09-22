@@ -199,3 +199,83 @@ def test_create_preset_invalid_waste_strategy_raises(conn):
             conn, name="X", target="saw", margin_top=0, margin_right=0, margin_bottom=0, margin_left=0,
             kerf=0, tool_diameter=0, part_spacing=0, allow_rotation=True, waste_strategy="not-a-real-strategy",
         )
+
+
+def test_list_label_settings_starts_empty(conn):
+    assert storage.list_label_settings(conn) == []
+
+
+def _make_label_settings(conn, name="A4 sheet 3x8", page_type="sheet"):
+    return storage.create_label_settings(
+        conn, name=name, page_type=page_type, page_width=210.0, page_height=297.0, label_width=63.5,
+        label_height=38.1, margin_top=10.0, margin_right=10.0, margin_bottom=10.0, margin_left=10.0,
+        gap_x=2.5, gap_y=2.5, show_qr_code=True, show_barcode=False, show_corner_marks=True,
+    )
+
+
+def test_create_and_list_label_settings(conn):
+    settings = _make_label_settings(conn)
+    assert settings.id is not None
+    assert settings.name == "A4 sheet 3x8"
+    assert settings.pageType == "sheet"
+    assert settings.showQrCode is True
+    assert settings.showBarcode is False
+    assert storage.list_label_settings(conn) == [settings]
+
+
+def test_update_label_settings(conn):
+    settings = _make_label_settings(conn)
+    updated = storage.update_label_settings(
+        conn, settings.id, name="Roll 70x40", page_type="roll", page_width=70.0, page_height=40.0,
+        label_width=70.0, label_height=40.0, margin_top=0.0, margin_right=0.0, margin_bottom=0.0,
+        margin_left=0.0, gap_x=0.0, gap_y=0.0, show_qr_code=True, show_barcode=True, show_corner_marks=False,
+    )
+    assert updated.name == "Roll 70x40"
+    assert updated.pageType == "roll"
+    assert updated.showBarcode is True
+    assert storage.list_label_settings(conn) == [updated]
+
+
+def test_update_nonexistent_label_settings_returns_none(conn):
+    assert storage.update_label_settings(
+        conn, 999, name="X", page_type="sheet", page_width=0, page_height=0, label_width=0, label_height=0,
+        margin_top=0, margin_right=0, margin_bottom=0, margin_left=0, gap_x=0, gap_y=0,
+        show_qr_code=True, show_barcode=False, show_corner_marks=True,
+    ) is None
+
+
+def test_delete_label_settings(conn):
+    settings = _make_label_settings(conn)
+    assert storage.delete_label_settings(conn, settings.id) is True
+    assert storage.list_label_settings(conn) == []
+
+
+def test_delete_nonexistent_label_settings_returns_false(conn):
+    assert storage.delete_label_settings(conn, 999) is False
+
+
+def test_create_label_settings_invalid_page_type_raises(conn):
+    with pytest.raises(ValueError):
+        _make_label_settings(conn, page_type="postcard")
+
+
+def test_default_label_settings_id_starts_none(conn):
+    assert storage.get_default_label_settings_id(conn) is None
+
+
+def test_set_and_get_default_label_settings_id(conn):
+    settings = _make_label_settings(conn)
+    storage.set_default_label_settings_id(conn, settings.id)
+    assert storage.get_default_label_settings_id(conn) == settings.id
+
+
+def test_set_default_label_settings_id_nonexistent_raises(conn):
+    with pytest.raises(ValueError):
+        storage.set_default_label_settings_id(conn, 999)
+
+
+def test_deleting_default_label_settings_clears_the_pointer(conn):
+    settings = _make_label_settings(conn)
+    storage.set_default_label_settings_id(conn, settings.id)
+    storage.delete_label_settings(conn, settings.id)
+    assert storage.get_default_label_settings_id(conn) is None

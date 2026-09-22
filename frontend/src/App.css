@@ -813,6 +813,93 @@ th {
   text-align: right;
 }
 
+/* ---------- label printing ---------- */
+
+.label-quick-sizes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.label-override-hint {
+  margin: -0.5rem 0 1rem;
+}
+
+.label-settings-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.label-settings-layout__fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.label-settings-inline-pair {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.label-settings-inline-pair input {
+  width: 0;
+  flex: 1;
+}
+
+.label-diagram {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.label-diagram__svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.label-diagram__page {
+  fill: var(--card-bg);
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.label-diagram__label {
+  fill: var(--card-bg);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.label-diagram__cell-caption {
+  font-size: 8px;
+  fill: var(--text-muted);
+  pointer-events: none;
+}
+
+.label-diagram__dim line {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+}
+
+.label-diagram__dim text {
+  font-size: 9px;
+  fill: var(--text-muted);
+}
+
+.label-diagram__caption {
+  margin: 0;
+  text-align: center;
+}
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 640px) {
@@ -877,6 +964,11 @@ th {
 
   .margin-layout__field--bottom {
     grid-row: 5;
+  }
+
+  .label-settings-layout {
+    grid-template-columns: 1fr;
+    justify-items: center;
   }
 }
 

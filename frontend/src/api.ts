@@ -1,4 +1,4 @@
-import type { ImportXmlResult, OptRequest, OptResult, Part, Preset, StockBoardWithCost, WasteStrategy } from "./types";
+import type { ImportXmlResult, LabelSettings, OptRequest, OptResult, Part, PersistedLabelSettings, Preset, StockBoardWithCost, WasteStrategy } from "./types";
 
 export class ApiError extends Error {
   errors: string[];
@@ -64,12 +64,16 @@ export async function deleteStockBoard(id: number): Promise<void> {
   await deleteJson(`/stock-boards/${id}`);
 }
 
-export async function getSettings(): Promise<{ wasteStrategyDefault: WasteStrategy }> {
+export async function getSettings(): Promise<{ wasteStrategyDefault: WasteStrategy; defaultLabelSettingsId: number | null }> {
   return (await getJson("/settings")).json();
 }
 
 export async function setWasteStrategyDefault(value: WasteStrategy): Promise<void> {
   await putJson("/settings", { wasteStrategyDefault: value });
+}
+
+export async function setDefaultLabelSettingsId(id: number | null): Promise<void> {
+  await putJson("/settings", { defaultLabelSettingsId: id });
 }
 
 export type PersistedPreset = Preset & { id: number };
@@ -84,6 +88,22 @@ export async function createPreset(preset: Preset): Promise<PersistedPreset> {
 
 export async function deletePreset(id: number): Promise<void> {
   await deleteJson(`/presets/${id}`);
+}
+
+export async function listLabelSettings(): Promise<PersistedLabelSettings[]> {
+  return (await getJson("/label-settings")).json();
+}
+
+export async function createLabelSettings(settings: LabelSettings & { name: string }): Promise<PersistedLabelSettings> {
+  return (await postJson("/label-settings", settings)).json();
+}
+
+export async function updateLabelSettings(id: number, settings: LabelSettings & { name: string }): Promise<PersistedLabelSettings> {
+  return (await putJson(`/label-settings/${id}`, settings)).json();
+}
+
+export async function deleteLabelSettings(id: number): Promise<void> {
+  await deleteJson(`/label-settings/${id}`);
 }
 
 export async function importNanxingXml(xmlText: string): Promise<ImportXmlResult> {
@@ -123,4 +143,15 @@ export async function downloadPdf(request: OptRequest, projectName: string): Pro
 export async function downloadXml(request: OptRequest, projectName: string): Promise<void> {
   const blob = await fetchExportBlob("/export/xml", request);
   triggerDownload(blob, `${projectName}-${timestamp()}.xml`);
+}
+
+export async function downloadLabels(
+  request: OptRequest,
+  labelSettings: LabelSettings,
+  overrides: { clientNameOverride: string; orderNoOverride: string },
+  projectName: string,
+): Promise<void> {
+  const res = await postJson("/export/labels", { ...request, labelSettings, ...overrides });
+  const blob = await res.blob();
+  triggerDownload(blob, `${projectName}-labels-${timestamp()}.pdf`);
 }

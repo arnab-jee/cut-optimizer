@@ -70,7 +70,7 @@ def test_delete_nonexistent_stock_board_returns_404(client):
 def test_settings_default_waste_strategy_is_balanced(client):
     resp = client.get("/settings")
     assert resp.status_code == 200
-    assert resp.json() == {"wasteStrategyDefault": "balanced"}
+    assert resp.json() == {"wasteStrategyDefault": "balanced", "defaultLabelSettingsId": None}
 
 
 def test_settings_update_and_persist_across_requests(client):
@@ -79,7 +79,7 @@ def test_settings_update_and_persist_across_requests(client):
     assert put_resp.json() == {"wasteStrategyDefault": "edge"}
 
     get_resp = client.get("/settings")
-    assert get_resp.json() == {"wasteStrategyDefault": "edge"}
+    assert get_resp.json() == {"wasteStrategyDefault": "edge", "defaultLabelSettingsId": None}
 
 
 def test_settings_update_invalid_value_returns_400(client):
@@ -199,3 +199,94 @@ def test_update_nonexistent_preset_returns_404(client):
 def test_delete_nonexistent_preset_returns_404(client):
     resp = client.delete("/presets/999")
     assert resp.status_code == 404
+
+
+def test_list_label_settings_starts_empty(client):
+    resp = client.get("/label-settings")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+LABEL_SETTINGS_PAYLOAD = {
+    "name": "A4 sheet 3x8",
+    "pageType": "sheet",
+    "pageWidth": 210.0,
+    "pageHeight": 297.0,
+    "labelWidth": 63.5,
+    "labelHeight": 38.1,
+    "marginTop": 10.0,
+    "marginRight": 10.0,
+    "marginBottom": 10.0,
+    "marginLeft": 10.0,
+    "gapX": 2.5,
+    "gapY": 2.5,
+    "showQrCode": True,
+    "showBarcode": False,
+    "showCornerMarks": True,
+}
+
+
+def test_create_list_update_delete_label_settings(client):
+    created = client.post("/label-settings", json=LABEL_SETTINGS_PAYLOAD)
+    assert created.status_code == 200
+    settings = created.json()
+    assert settings["name"] == "A4 sheet 3x8"
+    assert settings["pageType"] == "sheet"
+
+    listed = client.get("/label-settings").json()
+    assert listed == [settings]
+
+    updated_payload = {**LABEL_SETTINGS_PAYLOAD, "name": "Roll 70x40", "pageType": "roll", "showBarcode": True}
+    updated = client.put(f"/label-settings/{settings['id']}", json=updated_payload)
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Roll 70x40"
+    assert updated.json()["pageType"] == "roll"
+    assert updated.json()["showBarcode"] is True
+
+    deleted = client.delete(f"/label-settings/{settings['id']}")
+    assert deleted.status_code == 200
+    assert client.get("/label-settings").json() == []
+
+
+def test_create_label_settings_missing_field_returns_400(client):
+    payload = {k: v for k, v in LABEL_SETTINGS_PAYLOAD.items() if k != "name"}
+    resp = client.post("/label-settings", json=payload)
+    assert resp.status_code == 400
+
+
+def test_create_label_settings_invalid_page_type_returns_400(client):
+    resp = client.post("/label-settings", json={**LABEL_SETTINGS_PAYLOAD, "pageType": "postcard"})
+    assert resp.status_code == 400
+
+
+def test_update_nonexistent_label_settings_returns_404(client):
+    resp = client.put("/label-settings/999", json=LABEL_SETTINGS_PAYLOAD)
+    assert resp.status_code == 404
+
+
+def test_delete_nonexistent_label_settings_returns_404(client):
+    resp = client.delete("/label-settings/999")
+    assert resp.status_code == 404
+
+
+def test_settings_default_label_settings_id_round_trips(client):
+    resp = client.get("/settings")
+    assert resp.json()["defaultLabelSettingsId"] is None
+
+    created = client.post("/label-settings", json=LABEL_SETTINGS_PAYLOAD).json()
+    resp = client.put("/settings", json={"defaultLabelSettingsId": created["id"]})
+    assert resp.status_code == 200
+    assert resp.json()["defaultLabelSettingsId"] == created["id"]
+
+    resp = client.get("/settings")
+    assert resp.json()["defaultLabelSettingsId"] == created["id"]
+
+
+def test_deleting_default_label_settings_clears_the_default_pointer(client):
+    created = client.post("/label-settings", json=LABEL_SETTINGS_PAYLOAD).json()
+    client.put("/settings", json={"defaultLabelSettingsId": created["id"]})
+
+    client.delete(f"/label-settings/{created['id']}")
+
+    resp = client.get("/settings")
+    assert resp.json()["defaultLabelSettingsId"] is None

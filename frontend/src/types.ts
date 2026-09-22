@@ -140,6 +140,34 @@ export interface Preset {
   wasteStrategy: WasteStrategy;
 }
 
+// Label printing with QR code (sample_data/sample_labels/panel_qr_label.jpg): one printed label
+// per placed part, on either a fixed "sheet" (e.g. A4, tiled with a grid of labels) or
+// continuous "roll" paper (each page IS one label). Mirrors backend's
+// optimizer/export/labels.py's LabelSettings dataclass exactly.
+export type LabelPageType = "sheet" | "roll";
+
+export interface LabelSettings {
+  pageType: LabelPageType;
+  pageWidth: number; // mm
+  pageHeight: number; // mm
+  labelWidth: number; // mm
+  labelHeight: number; // mm
+  marginTop: number; // mm, "sheet" only
+  marginRight: number;
+  marginBottom: number;
+  marginLeft: number;
+  gapX: number; // mm, "sheet" only
+  gapY: number;
+  showQrCode: boolean;
+  showBarcode: boolean;
+  showCornerMarks: boolean;
+}
+
+export interface PersistedLabelSettings extends LabelSettings {
+  id: number;
+  name: string;
+}
+
 // Response shape for POST /import/xml (Updates/update_006.md) — loading an existing Nanxing FCC
 // nesting XML and viewing it the same way a fresh /optimize result is viewed. No `parts`/`cuts`:
 // this app doesn't re-export an imported job (see App.tsx's isImported gating), since /export/*

@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import "./App.css";
-import { ApiError, downloadPdf, downloadXml, getSettings, optimize, parseCsv, setWasteStrategyDefault } from "./api";
+import { ApiError, downloadLabels, downloadPdf, downloadXml, getSettings, listLabelSettings, optimize, parseCsv, setWasteStrategyDefault } from "./api";
 import { CsvUpload, type CsvLoaded } from "./components/CsvUpload";
 import { ColumnMapping } from "./components/ColumnMapping";
+import { LabelSettingsLibrary } from "./components/LabelSettingsLibrary";
+import { LabelSettingsPanel } from "./components/LabelSettingsPanel";
 import { MachineSelector } from "./components/MachineSelector";
 import { MaterialBreakdown } from "./components/MaterialBreakdown";
 import { ParamsPanel } from "./components/ParamsPanel";
@@ -14,7 +16,26 @@ import { Summary } from "./components/Summary";
 import { UtilizationChart } from "./components/UtilizationChart";
 import { WasteStrategyComparison } from "./components/WasteStrategyComparison";
 import { XmlImport } from "./components/XmlImport";
-import type { ImportXmlResult, Margin, OptRequest, OptResult, Part, PlacementCorner, Preset, StockBoardWithCost, TargetMachine, WasteStrategy } from "./types";
+import type { ImportXmlResult, LabelSettings, Margin, OptRequest, OptResult, Part, PlacementCorner, Preset, StockBoardWithCost, TargetMachine, WasteStrategy } from "./types";
+
+// Built-in fallback until the user saves/picks a label-settings preset -- mirrors backend
+// storage.py's DEFAULT_LABEL_SETTINGS exactly (A4 sheet, 3x8 grid of 63.5x38.1mm labels).
+const DEFAULT_LABEL_SETTINGS: LabelSettings = {
+  pageType: "sheet",
+  pageWidth: 210,
+  pageHeight: 297,
+  labelWidth: 63.5,
+  labelHeight: 38.1,
+  marginTop: 10,
+  marginRight: 10,
+  marginBottom: 10,
+  marginLeft: 10,
+  gapX: 2.5,
+  gapY: 2.5,
+  showQrCode: true,
+  showBarcode: false,
+  showCornerMarks: true,
+};
 
 export type Step = "upload" | "map" | "configure" | "results";
 
@@ -46,14 +67,35 @@ function App() {
   const [wasteStrategy, setWasteStrategyState] = useState<WasteStrategy>("balanced");
   const [showCutLines, setShowCutLines] = useState(false);
   const [placementCorner, setPlacementCorner] = useState<PlacementCorner>("top-right");
+  const [labelSettings, setLabelSettings] = useState<LabelSettings>(DEFAULT_LABEL_SETTINGS);
+  // Panel Saw CSVs have no Client/Project column at all, and a part's own barcode/posId can
+  // occasionally be missing too -- these are job-level manual fallbacks, entered fresh per job
+  // (not persisted as part of a reusable LabelSettings preset), used only when the CSV itself
+  // can't supply the data.
+  const [clientNameOverride, setClientNameOverride] = useState("");
+  const [orderNoOverride, setOrderNoOverride] = useState("");
 
   // Load the persisted default once on mount, then keep it "sticky": every change the user
   // makes gets saved back as the new default for next time (Updates/update_004.md).
   useEffect(() => {
     getSettings()
-      .then((s) => setWasteStrategyState(s.wasteStrategyDefault))
+      .then((s) => {
+        setWasteStrategyState(s.wasteStrategyDefault);
+        if (s.defaultLabelSettingsId != null) {
+          // Settings only carries the id -- the full row is needed, so resolve it against the
+          // library list rather than adding a single-item GET endpoint just for this lookup.
+          listLabelSettings()
+            .then((items) => {
+              const match = items.find((i) => i.id === s.defaultLabelSettingsId);
+              if (match) setLabelSettings(match);
+            })
+            .catch(() => {
+              /* fall back to the built-in default already set */
+            });
+        }
+      })
       .catch(() => {
-        /* fall back to the "balanced" default already set — persistence is a nice-to-have here */
+        /* fall back to the "balanced"/built-in defaults already set — persistence is a nice-to-have here */
       });
   }, []);
 
@@ -138,11 +180,12 @@ function App() {
     }
   }
 
-  async function handleDownload(kind: "pdf" | "xml") {
+  async function handleDownload(kind: "pdf" | "xml" | "labels") {
     setDownloadErrors([]);
     try {
       if (kind === "pdf") await downloadPdf(currentRequest(), projectName);
-      else await downloadXml(currentRequest(), projectName);
+      else if (kind === "xml") await downloadXml(currentRequest(), projectName);
+      else await downloadLabels(currentRequest(), labelSettings, { clientNameOverride, orderNoOverride }, projectName);
     } catch (e) {
       setDownloadErrors(e instanceof ApiError ? e.errors : [String(e)]);
     }
@@ -230,6 +273,15 @@ function App() {
             current={{ target, margin, kerf, toolDiameter, partSpacing, allowRotation, wasteStrategy }}
             onApply={applyPreset}
           />
+          <LabelSettingsPanel
+            settings={labelSettings}
+            onChange={setLabelSettings}
+            clientNameOverride={clientNameOverride}
+            onClientNameOverrideChange={setClientNameOverride}
+            orderNoOverride={orderNoOverride}
+            onOrderNoOverrideChange={setOrderNoOverride}
+          />
+          <LabelSettingsLibrary current={labelSettings} onApply={setLabelSettings} />
           <ErrorAlert errors={optimizeErrors} />
           <div className="actions">
             <button className="btn btn--secondary" onClick={() => setStep("map")} disabled={optimizing}>
@@ -271,6 +323,9 @@ function App() {
                     Download XML
                   </button>
                 )}
+                <button className="btn btn--primary" onClick={() => handleDownload("labels")}>
+                  Download labels (PDF)
+                </button>
                 <button className="btn btn--secondary" onClick={() => setStep("configure")}>
                   Adjust parameters
                 </button>
