@@ -117,11 +117,16 @@ def _deduplicate_layouts(sheets: list[Sheet]) -> list[tuple[Sheet, int]]:
 def _cutting_list(sheet: Sheet) -> tuple[list[dict], dict[int, int]]:
     """Groups placed parts by (name, nominal length, nominal width) in order of first
     appearance, assigning each group a running 'Symbol' number — the reference labels every
-    instance of a group in the drawing as '{symbol}.{name}' and lists Length/Width/Qty once per
-    group in the sidebar cutting list, rather than repeating a full label per instance."""
+    instance of a group in the drawing as '{symbol}.{name}' and lists Name/Length/Width/Qty
+    once per group in the sidebar cutting list, rather than repeating a full label per
+    instance. Grouping includes name deliberately: two differently-named parts that happen to
+    share a size are still two different physical pieces an operator needs to tell apart (e.g.
+    a left/right pair) — confirmed directly with the project owner (2026-09-22). The sidebar's
+    own Name column (added the same pass) is what makes the distinction visible, rather than
+    two rows with identical Length/Width and no visible reason they're different."""
     groups: dict[tuple, int] = {}
     counts: dict[int, int] = {}
-    dims: dict[int, tuple[float, float]] = {}
+    dims: dict[int, tuple[str, float, float]] = {}
     symbol_by_index: dict[int, int] = {}
     next_symbol = 1
     for i, p in enumerate(sheet.placed):
@@ -129,13 +134,16 @@ def _cutting_list(sheet: Sheet) -> tuple[list[dict], dict[int, int]]:
         key = (p.name, round(length, 1), round(width, 1))
         if key not in groups:
             groups[key] = next_symbol
-            dims[next_symbol] = (length, width)
+            dims[next_symbol] = (p.name, length, width)
             counts[next_symbol] = 0
             next_symbol += 1
         symbol = groups[key]
         counts[symbol] += 1
         symbol_by_index[i] = symbol
-    rows = [{"symbol": s, "length": dims[s][0], "width": dims[s][1], "qty": counts[s]} for s in sorted(counts)]
+    rows = [
+        {"symbol": s, "name": dims[s][0], "length": dims[s][1], "width": dims[s][2], "qty": counts[s]}
+        for s in sorted(counts)
+    ]
     return rows, symbol_by_index
 
 
@@ -254,17 +262,36 @@ def _draw_sidebar_top(canvas: Canvas, sheet: Sheet, x0: float, x1: float, top_y:
         y -= 10
 
 
+def _cutting_list_columns(x0: float, x1: float) -> tuple[float, float, float, float, float]:
+    """Returns (col_symbol, col_name, col_length, col_width, col_qty) — the x position of each
+    Cutting List column, factored out so the gaps between them (does "Sym"'s header, or a
+    2-digit symbol number, actually fit before col_name starts? does "340.5 mm" fit before
+    col_qty?) can be checked directly in a test rather than only by eyeballing a rendered page.
+    Real bug caught this way (2026-09-22): the Name column originally started right after
+    col_symbol with almost no gap, so a rendered PDF showed "1Bed Bottom" and a "Symbol"/"Name"
+    header running together with no space. col_symbol starts at x0+PAD (not a fraction of the
+    sidebar width like the others), matching every other sidebar element's own left inset."""
+    col_symbol = x0 + PAD
+    col_name = x0 + (x1 - x0) * 0.175
+    col_length = x0 + (x1 - x0) * 0.485
+    col_width = x0 + (x1 - x0) * 0.683
+    col_qty = x0 + (x1 - x0) * 0.893
+    return col_symbol, col_name, col_length, col_width, col_qty
+
+
 def _draw_cutting_list(canvas: Canvas, rows: list[dict], x0: float, x1: float, top_y: float, bottom_y: float) -> None:
     canvas.setFillColorRGB(0, 0, 0)
     canvas.setFont("Helvetica-Bold", 9)
     canvas.drawCentredString((x0 + x1) / 2, top_y - 10, "Cutting List")
     header_y = top_y - 24
-    col_symbol = x0 + PAD
-    col_length = x0 + (x1 - x0) * 0.28
-    col_width = x0 + (x1 - x0) * 0.56
-    col_qty = x0 + (x1 - x0) * 0.84
+    col_symbol, col_name, col_length, col_width, col_qty = _cutting_list_columns(x0, x1)
+    name_w = col_length - col_name - 2.0
     canvas.setFont("Helvetica-Bold", 7)
-    canvas.drawString(col_symbol, header_y, "Symbol")
+    # "Sym" not "Symbol" -- the column itself only ever holds a 1-2 digit number (matching the
+    # already-abbreviated "Qty"); the full word doesn't fit before col_name without either
+    # overlapping it or squeezing the new Name column uncomfortably narrow.
+    canvas.drawString(col_symbol, header_y, "Sym")
+    canvas.drawString(col_name, header_y, "Name")
     canvas.drawString(col_length, header_y, "Length")
     canvas.drawString(col_width, header_y, "Width")
     canvas.drawString(col_qty, header_y, "Qty")
@@ -273,15 +300,18 @@ def _draw_cutting_list(canvas: Canvas, rows: list[dict], x0: float, x1: float, t
     if not rows:
         return
     row_h = min(12.0, max(6.0, available / len(rows)))
-    canvas.setFont("Helvetica", 7)
     y = header_y - 12
     for row in rows:
         if y < bottom_y:
             break
+        canvas.setFont("Helvetica", 7)
         canvas.drawString(col_symbol, y, str(row["symbol"]))
         canvas.drawString(col_length, y, f"{fmt_num(row['length'])} mm")
         canvas.drawString(col_width, y, f"{fmt_num(row['width'])} mm")
         canvas.drawString(col_qty, y, str(row["qty"]))
+        name_size = _shrink_to_fit(canvas, row["name"], name_w, 7.0, min_size=4.5, font="Helvetica")
+        canvas.setFont("Helvetica", name_size)
+        canvas.drawString(col_name, y, row["name"])
         y -= row_h
 
 

@@ -3,10 +3,13 @@ from io import BytesIO
 
 from pypdf import PdfReader
 
+from reportlab.pdfgen.canvas import Canvas
+
 from optimizer.export.pdf import (
     _color_for_index,
     _cut_line_bounds,
     _cutting_list,
+    _cutting_list_columns,
     _deduplicate_layouts,
     _grain_direction_is_vertical,
     _nominal_dims,
@@ -57,6 +60,22 @@ def test_page_text_includes_header_and_stats(saw_parts, default_margin):
     assert first_sheet.material in text
     assert "Job Sheets :" in text
     assert "Sheet Cut Length :" in text
+
+
+def test_cutting_list_renders_a_name_column_with_each_symbols_own_name():
+    # Checked against the raw content stream, not extract_text(): "Name" alone would also
+    # (spuriously) match inside the unrelated "Client Name :" header field once extracted as
+    # plain text, so this looks for the literal, standalone "(Name) Tj" header token instead —
+    # something only the cutting list's own column header would ever produce.
+    sheet = _sheet(placed=[
+        _part(name="LEFT SIDE", x=0, y=0, w=150.0, h=470.0, rotated=False),
+        _part(name="RIGHT SIDE", x=150, y=0, w=150.0, h=470.0, rotated=False),
+    ])
+    pdf_bytes = render_layout_pdf(OptResult(sheets=[sheet], unplaced=[]))
+    content = bytes(PdfReader(BytesIO(pdf_bytes)).pages[0].get_contents().get_data()).decode("latin-1")
+    assert "(Name) Tj" in content
+    assert "(LEFT SIDE) Tj" in content
+    assert "(RIGHT SIDE) Tj" in content
 
 
 def test_client_name_and_order_no_render_when_provided(saw_parts, default_margin):
@@ -115,6 +134,24 @@ def test_cutting_list_groups_by_name_and_nominal_dims_with_running_symbols():
     assert symbol_by_index[0] == symbol_by_index[1]
     assert symbol_by_index[2] != symbol_by_index[0]
     assert {r["symbol"]: r["qty"] for r in rows} == {symbol_by_index[0]: 2, symbol_by_index[2]: 1}
+    assert {r["symbol"]: r["name"] for r in rows} == {symbol_by_index[0]: "SHUTTER", symbol_by_index[2]: "SHUTTER"}
+
+
+def test_cutting_list_keeps_same_dims_separate_across_different_names():
+    # Confirmed directly with the project owner (2026-09-22): two differently-named parts that
+    # happen to share a size (e.g. a left/right pair) must stay two separate rows/symbols, not
+    # merge into one -- an operator needs to tell them apart. The sidebar's own Name column
+    # (added the same pass) is what makes that distinction visible instead of two rows with
+    # identical Length/Width and no visible reason they're different.
+    sheet = _sheet(placed=[
+        _part(name="LEFT SIDE", x=0, y=0, w=150.0, h=470.0, rotated=False),
+        _part(name="RIGHT SIDE", x=150, y=0, w=150.0, h=470.0, rotated=False),
+    ])
+    rows, symbol_by_index = _cutting_list(sheet)
+    assert symbol_by_index[0] != symbol_by_index[1]
+    assert len(rows) == 2
+    assert {r["name"] for r in rows} == {"LEFT SIDE", "RIGHT SIDE"}
+    assert all(r["qty"] == 1 for r in rows)
 
 
 def test_cutting_list_uses_nominal_dims_not_rotated_footprint():
@@ -191,6 +228,28 @@ def test_sidebar_bottom_boxes_stay_above_the_footer_strip():
     assert occ_bottom == grain_top
     assert occ_top > occ_bottom
     assert occ_top <= content_y1
+
+
+def test_cutting_list_columns_dont_collide():
+    # Regression: the Name column originally started right after col_symbol with almost no
+    # gap (a real rendered PDF showed "1Bed Bottom" and a "Sym"/"Name" header running together
+    # with no space) -- checked here against real ReportLab font metrics, not just eyeballed
+    # coordinates, using the exact x0/x1 the production sidebar actually uses (frame_x0,
+    # sidebar_x1 for a real A4 page), and against real-job-scale values (a 4-digit "1839 mm"
+    # length, a "340.5 mm" width), not just the column headers.
+    x0, x1 = 28.3465, 189.9215
+    col_symbol, col_name, col_length, col_width, col_qty = _cutting_list_columns(x0, x1)
+    canvas = Canvas(BytesIO())
+    gap = 2.0
+    assert canvas.stringWidth("Sym", "Helvetica-Bold", 7) + gap <= col_name - col_symbol
+    # Data rows can have a genuine 2-digit symbol number (jobs with 10+ distinct groups).
+    assert canvas.stringWidth("20", "Helvetica", 7) + gap <= col_name - col_symbol
+    assert canvas.stringWidth("Name", "Helvetica-Bold", 7) + gap <= col_length - col_name
+    assert canvas.stringWidth("Length", "Helvetica-Bold", 7) + gap <= col_width - col_length
+    assert canvas.stringWidth("1839 mm", "Helvetica", 7) + gap <= col_width - col_length
+    assert canvas.stringWidth("Width", "Helvetica-Bold", 7) + gap <= col_qty - col_width
+    assert canvas.stringWidth("340.5 mm", "Helvetica", 7) + gap <= col_qty - col_width
+    assert canvas.stringWidth("Qty", "Helvetica-Bold", 7) + gap <= x1 - col_qty
 
 
 def test_color_cycles_through_palette_by_placement_order():

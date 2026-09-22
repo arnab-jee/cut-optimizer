@@ -106,6 +106,15 @@ function App() {
     });
   }
 
+  // "strips" is Panel Saw only (ParamsPanel.tsx hides the option for Nanxing) — if the target
+  // switches away from saw while it's selected (manual switch, XML import forcing nanxing,
+  // etc.), fall back to "balanced" for this session rather than sending an option Nanxing has
+  // no dispatch for. Local state only, not persisted — the user's saved default sticks around
+  // for next time they're back on the panel saw.
+  useEffect(() => {
+    if (target !== "saw" && wasteStrategy === "strips") setWasteStrategyState("balanced");
+  }, [target, wasteStrategy]);
+
   const [optResult, setOptResult] = useState<OptResult | null>(null);
   const [optimizing, setOptimizing] = useState(false);
   const [optimizeErrors, setOptimizeErrors] = useState<string[]>([]);

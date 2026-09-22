@@ -10,10 +10,15 @@ interface Props {
 const STRATEGY_LABEL: Record<WasteStrategy, string> = {
   balanced: "Balanced (tightest local fit)",
   edge: "Push wastage to edges",
+  strips: "Strips (easiest to hand-cut)",
 };
 
 function otherStrategy(current: WasteStrategy): WasteStrategy {
-  return current === "balanced" ? "edge" : "balanced";
+  // "strips" is a different placement algorithm entirely (not a balanced/edge-style split-axis
+  // variant), so there's no natural "opposite" for it — compare against "balanced" as the
+  // baseline a strips job would otherwise have used (same baseline "edge" compares against).
+  if (current === "balanced") return "edge";
+  return "balanced";
 }
 
 interface Stats {

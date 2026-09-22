@@ -129,6 +129,12 @@ export function ParamsPanel({
             <select value={wasteStrategy} onChange={(e) => onWasteStrategyChange(e.target.value as WasteStrategy)}>
               <option value="balanced">Balanced (tightest local fit)</option>
               <option value="edge">Push wastage to edges</option>
+              {/* Panel Saw only — groups parts into full-length, single-width strips so an
+                  operator only ever needs full-length strip cuts plus plain crosscuts, never a
+                  cut that starts/stops mid-board. Trades some material efficiency for that
+                  simplicity (see optimizer/saw_packing.py's own docstring for the measured
+                  trade-off) — not offered for Nanxing, which has no manual-cutting operator. */}
+              {target === "saw" && <option value="strips">Strips (easiest to hand-cut)</option>}
             </select>
           </label>
           <label className="field">

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .model import Margin, Part, PlacedPart, Sheet, StockBoard, Offcut, WasteStrategy
 
@@ -149,6 +149,147 @@ def _footprint(part: Part, rotated: bool) -> tuple[float, float]:
     return part.cutLength, part.cutWidth
 
 
+@dataclass
+class _StripInstance:
+    """One full-length vertical strip: a fixed local-x width shared by every part inside it,
+    with its parts simply stacked along local-y (length) in placement order."""
+    width: float
+    items: list[tuple[Part, bool, float, float]] = field(default_factory=list)  # (part, rotated, pw, ph)
+    used: float = 0.0
+
+
+def _place_parts_on_board_strips(
+    parts: list[Part], board: StockBoard, margin: Margin, gap: float, allow_rotation: bool, sheet_index: int,
+) -> tuple[Sheet, list[Part]]:
+    """"strips" waste strategy: groups parts by shared width into full-length vertical strips —
+    every strip holds exactly one width, and its parts are just stacked by length inside it. An
+    operator manually cutting this only ever needs two kinds of cuts: a handful of full-length
+    strip cuts across the whole board, then plain crosscuts within each strip — never a cut that
+    starts or stops mid-board. Confirmed against a real MaxCut reference PDF the project owner
+    uses for manual panel-saw work (2026-09-22): its own layouts follow exactly this pattern.
+    This trades some material efficiency for that simplicity — measured on the real reference
+    job, MaxCut's own strip layout had *higher* wastage than this app's free-rectangle packer on
+    the same material/sheets, not lower — so this is an operator-convenience choice, not a
+    strict efficiency win, which is why it's opt-in rather than the default.
+    """
+    width = board.width - margin.left - margin.right
+    height = board.length - margin.top - margin.bottom
+
+    # Step 1: pick each part's (rotated, pw, ph). Grain-locked parts have only one valid
+    # footprint (_footprint's own grain-mandated split, can_rotate()==False for them) — used
+    # as-is. grain="none" parts are free to run either raw dimension (cutLength or cutWidth)
+    # along the strip-width axis, since nothing downstream of the panel saw's own PDF/preview
+    # cares which one "means" rotated here (unlike the Nanxing router, where a real machine
+    # label convention forces a specific choice — see _footprint's own docstring). So instead
+    # of defaulting to _footprint(part, False)'s pick (which favors cutLength for grain="none"
+    # for an unrelated reason), each grain="none" part picks whichever of its two raw
+    # dimensions is shared by more parts overall — maximizing how many parts land in the same
+    # strip group, which is the entire point of this mode. Real-data check: a real 130-part
+    # drawer-parts CSV has cutWidth repeat far more than cutLength (2 dominant widths cover 90
+    # of 130 parts, vs. cutLength values that are mostly unique per cabinet opening) — this
+    # heuristic finds that automatically rather than assuming which raw column repeats more.
+    value_counts: dict[float, int] = {}
+    for part in parts:
+        if allow_rotation and part.can_rotate():
+            for v in (part.cutLength, part.cutWidth):
+                key = round(v, 1)
+                value_counts[key] = value_counts.get(key, 0) + 1
+        else:
+            fixed_pw, _ = _footprint(part, False)
+            key = round(fixed_pw, 1)
+            value_counts[key] = value_counts.get(key, 0) + 1
+
+    assigned: dict[str, tuple[bool, float, float]] = {}
+    for part in parts:
+        if allow_rotation and part.can_rotate():
+            len_key, wid_key = round(part.cutLength, 1), round(part.cutWidth, 1)
+            if value_counts.get(wid_key, 0) > value_counts.get(len_key, 0):
+                assigned[part.id] = (True, part.cutWidth, part.cutLength)
+            else:
+                assigned[part.id] = (False, part.cutLength, part.cutWidth)
+        else:
+            pw, ph = _footprint(part, False)
+            assigned[part.id] = (False, pw, ph)
+
+    # Step 2: group by final chosen width, then split each group into one or more same-width
+    # strip instances via first-fit-decreasing on length — a group's total length doesn't
+    # necessarily fit in one board-length strip.
+    groups: dict[float, list[Part]] = {}
+    for part in parts:
+        _, pw, _ = assigned[part.id]
+        groups.setdefault(round(pw, 1), []).append(part)
+
+    all_instances: list[_StripInstance] = []
+    for group_parts in groups.values():
+        ordered = sorted(group_parts, key=lambda p: -assigned[p.id][2])
+        open_instances: list[_StripInstance] = []
+        for part in ordered:
+            rotated, pw, ph = assigned[part.id]
+            needed = ph + gap
+            if needed > height + 1e-9:
+                # Doesn't fit this board's usable length in the only orientation this group
+                # allows it — leave it out of every instance; it stays in still_remaining, and
+                # the caller's genuinely-unplaceable handling takes over if that never changes.
+                continue
+            target = next((inst for inst in open_instances if inst.used + needed <= height + 1e-9), None)
+            if target is None:
+                target = _StripInstance(width=pw)
+                open_instances.append(target)
+            target.items.append((part, rotated, pw, ph))
+            target.used += needed
+        all_instances.extend(open_instances)
+
+    # Step 3: decide which strip instances fit this board's width — widest first, but still
+    # scanning every remaining instance afterward rather than stopping at the first miss, so a
+    # later, narrower instance can still use whatever width is left. Simple and deterministic,
+    # not a provably optimal knapsack fill.
+    all_instances.sort(key=lambda inst: -inst.width)
+    accepted: list[_StripInstance] = []
+    used_width = 0.0
+    for inst in all_instances:
+        needed = inst.width + gap
+        if used_width + needed <= width + 1e-9:
+            accepted.append(inst)
+            used_width += needed
+
+    placed_ids = {part.id for inst in accepted for part, *_ in inst.items}
+    still_remaining = [p for p in parts if p.id not in placed_ids]
+
+    placed_parts: list[PlacedPart] = []
+    offcuts: list[Offcut] = []
+    x_cursor = 0.0
+    for inst in accepted:
+        y_cursor = 0.0
+        for part, rotated, pw, ph in inst.items:
+            placed_parts.append(
+                PlacedPart(
+                    partId=part.id, x=x_cursor + margin.left, y=y_cursor + margin.top, rotated=rotated,
+                    w=pw, h=ph, name=part.name, material=part.material, thickness=part.thickness, grain=part.grain,
+                )
+            )
+            y_cursor += ph + gap
+        leftover_len = height - inst.used
+        if leftover_len > 1e-6:
+            offcuts.append(Offcut(x=x_cursor + margin.left, y=inst.used + margin.top, w=inst.width, h=leftover_len))
+        x_cursor += inst.width + gap
+
+    leftover_width = width - used_width
+    if leftover_width > 1e-6:
+        offcuts.append(Offcut(x=used_width + margin.left, y=margin.top, w=leftover_width, h=height))
+
+    board_area = width * height
+    placed_area = sum(p.w * p.h for p in placed_parts)
+    utilization = 0.0 if board_area <= 0 else round(placed_area / board_area * 100.0, 2)
+
+    return (
+        Sheet(
+            index=sheet_index, material=board.material, boardL=board.length, boardW=board.width,
+            thickness=board.thickness, placed=placed_parts, offcuts=offcuts, utilizationPct=utilization,
+        ),
+        still_remaining,
+    )
+
+
 def place_parts_on_board(
     parts: list[Part], board: StockBoard, margin: Margin, gap: float, allow_rotation: bool, sheet_index: int,
     waste_strategy: WasteStrategy = "balanced",
@@ -158,7 +299,13 @@ def place_parts_on_board(
     recent one), so leftover space anywhere on the sheet can still be backfilled by a
     later, smaller part. `gap` is the clearance reserved around each part (saw kerf or
     router part-spacing — same role either way).
+
+    `waste_strategy="strips"` dispatches to a completely different placement algorithm
+    (_place_parts_on_board_strips) rather than just changing guillotine_split's cut axis like
+    "balanced"/"edge" do — see that function's own docstring.
     """
+    if waste_strategy == "strips":
+        return _place_parts_on_board_strips(parts, board, margin, gap, allow_rotation, sheet_index)
     width = board.width - margin.left - margin.right
     height = board.length - margin.top - margin.bottom
     free_rects = [Rectangle(0.0, 0.0, width, height)]

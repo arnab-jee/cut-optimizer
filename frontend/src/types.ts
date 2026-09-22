@@ -2,7 +2,8 @@
 
 export type Grain = "none" | "length" | "width";
 export type TargetMachine = "saw" | "nanxing";
-export type WasteStrategy = "balanced" | "edge";
+// "strips" is Panel Saw only (backend/optimizer/saw_packing.py) — see model.py's own comment.
+export type WasteStrategy = "balanced" | "edge" | "strips";
 
 export interface EdgeSet {
   l1: string;

@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS label_settings (
 
 WASTE_STRATEGY_DEFAULT_KEY = "wasteStrategyDefault"
 DEFAULT_WASTE_STRATEGY = "balanced"
-VALID_WASTE_STRATEGIES = ("balanced", "edge")
+VALID_WASTE_STRATEGIES = ("balanced", "edge", "strips")
 VALID_TARGETS = ("saw", "nanxing")
 # ₹/board and ₹/sqft for now (currency is always ₹) — a plain, extensible tuple rather than an
 # enum/Literal so a future unit (e.g. ₹/sqm) is a one-line addition here and in the frontend's

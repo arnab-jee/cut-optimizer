@@ -126,7 +126,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-09-22 — thirty-three passes across eight sessions (this session opened
+- **Last worked:** 2026-09-22 — thirty-five passes across eight sessions (this session opened
   without the direct conversation history for passes 9–18 below — resumed entirely from this
   file, the auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is
   exactly the point of keeping this file current). (1) Applied
@@ -1138,6 +1138,96 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   into `nanxing.py` only, never into `guillotine.py`/the panel saw path — extending it there is a
   real, scoped follow-up candidate, not started this pass (see updated item 18 below). No
   frontend changes either fix.
+  (34) The project owner raised a real, practical problem with the panel saw's default
+  layouts: an operator manually cutting a sheet has to figure out from where to cut by eye —
+  our free-rectangle packer's layouts interleave many different part widths into a jagged,
+  multi-level guillotine tree that's technically valid but hard for a human to execute
+  correctly. Given a real MaxCut reference PDF (a manual-cutting-focused competitor) for the
+  same job/material (`GP_HDH17_5900_BS`), confirmed by decoding both PDFs' raw rectangle
+  coordinates: MaxCut arranges every sheet into full-length vertical strips, each strip one
+  uniform width top-to-bottom, parts simply stacked by length inside it — an operator needs
+  only two kinds of cuts (full-length strip cuts, then plain crosscuts within a strip), never
+  one that starts/stops mid-board. Checked the real CSV to confirm this isn't a fluke of one
+  demo job: 130 real parts collapse into 9 distinct widths, two of which alone cover 90 of
+  them — typical of cabinetry cut lists (drawer parts repeat a board width, vary in length).
+  Measured a real trade-off before proposing anything: MaxCut's own Job Wastage (22.73%) was
+  *higher* than this app's existing "balanced" output (17.99%) on the same job — MaxCut
+  trades material efficiency for cut simplicity, so this isn't a strict win either way.
+  Asked three scoping questions via `AskUserQuestion` before writing code (exposure as a new
+  opt-in mode vs. replacing the default; whether a strip may mix widths to save material;
+  what happens to a part whose width matches nothing else) — all three defaulted to the
+  simplest, MaxCut-matching answer (new opt-in strategy; strictly single-width per strip, no
+  mixing; an orphan gets its own strip).
+
+  **Implemented as a new `"strips"` `WasteStrategy` value, Panel Saw only** (`optimizer/
+  saw_packing.py`'s `_place_parts_on_board_strips`, dispatched from `place_parts_on_board`
+  before any of the existing free-rectangle logic runs — `nanxing_packing.py` has no
+  equivalent, matching the project's "two machines = two different optimizers" principle and
+  the fact that an automated router has no manual-cutting operator to simplify for).
+  Algorithm: (1) for grain-locked parts, use `_footprint`'s existing grain-mandated split
+  as-is (only one valid orientation anyway); for grain="none" parts, freely pick whichever
+  raw dimension (`cutLength` or `cutWidth`) is shared by more parts overall, favoring no
+  rotation on ties — this needed a real fix mid-implementation: an early version defaulted
+  grain="none" parts to `_footprint(part, False)`'s pick, which (for an unrelated reason —
+  the Nanxing machine-label convention `_footprint` also encodes) favors `cutLength`
+  regardless of which raw dimension actually repeats more, and produced dramatically worse
+  groupings (real job: 6 sheets, utilizations as low as 16%) until corrected to compare raw
+  dimension frequency directly. (2) Group parts by their chosen width, split each group into
+  one or more same-width "strip instances" via first-fit-decreasing on length (a group's
+  total length doesn't always fit one board-length strip). (3) Decide which instances fit
+  this board's width via a simple widest-first greedy fill that still scans every remaining
+  instance afterward (so a later, narrower instance can use whatever width is left) rather
+  than stopping at the first miss. Offcuts computed directly (leftover length within each
+  accepted strip, plus one region for any entirely-unused board width) — no dependency on
+  `merge_free_rects`/`guillotine_split` machinery at all, this is a structurally different
+  algorithm, not a variant of the existing one. `build_cuts_for_sheet` (`guillotine.py`)
+  needed no changes — it already derives cut lines generically from placed-part boundaries,
+  and since every part in a strip shares exact x-boundaries by construction, the derived cut
+  lines automatically come out as clean full-length strip cuts.
+
+  **Verified thoroughly**: `sample_data/`'s `saw_parts` fixture — 0 overlaps, guillotine-
+  decomposable, every physical strip (same x) holds exactly one width (checked directly, not
+  assumed). Real reproduction of the reported job's specific material (130 parts,
+  `GP_HDH17_5900_BS`): 4 sheets, 0 unplaced, 72–83% utilization on 3 of 4 sheets — the 4th
+  (20%) traced and confirmed *inherent*, not a bug: the 14 leftover parts all share one
+  width (80mm) with nowhere else to go, and the first 3 sheets were independently confirmed
+  already using 95–98% of their own board width, leaving no room to slot an extra 80mm strip
+  in earlier. Real end-to-end HTTP smoke test (`TestClient`): `/parse` → `/optimize` →
+  `/export/pdf` all 200, and rendered the actual PDF (`pdftoppm`) to visually confirm the
+  strip pattern renders correctly, including this session's earlier dimension-label fix
+  holding up on the new layout shape too. New `backend/tests/test_saw_strips.py` (+9 tests):
+  overlap/guillotine-cuttable on the real fixture, strip-purity (no width-mixing), the
+  frequency-based grouping heuristic (both the "rotate to join the bigger group" and
+  "no rotation needed, already matches" cases), orphan-gets-own-strip, grain-locked parts
+  never rotated even when it would help them group, a group needing multiple strip instances
+  on one board, a genuinely-too-large part correctly ending up unplaced, a real-job
+  regression, and confirming Nanxing safely ignores an unrecognized `"strips"` value rather
+  than erroring (falls through to `guillotine_split`'s existing "balanced" default) — verified
+  the whole file has teeth by temporarily removing `_place_parts_on_board_strips` (hard
+  `ImportError`, strongest possible confirmation). Full backend suite: 212 passing (+9), no
+  regressions. `storage.VALID_WASTE_STRATEGIES` extended so the sticky default/presets accept
+  `"strips"` too. Frontend: `ParamsPanel.tsx`'s "Waste placement" dropdown offers "Strips
+  (easiest to hand-cut)" only when `target === "saw"`; a new `App.tsx` effect resets a
+  lingering `"strips"` selection back to `"balanced"` (session-local only, not the persisted
+  default) if the target ever switches away from saw, so Nanxing can never receive a value it
+  has no dispatch for. `WasteStrategyComparison.tsx`'s `otherStrategy()` — previously a
+  strict balanced↔edge toggle — now treats `"strips"` as comparing against `"balanced"` (its
+  natural baseline) rather than crashing on a missing label. `tsc -b`/lint/build all clean.
+  (35) A real rendered PDF's Cutting List sidebar showed two rows with identical Length/Width
+  (150mm x 470mm) printed separately as Symbol 2 (qty 9) and Symbol 3 (qty 9) instead of one
+  merged row (qty 18). Root cause: `_cutting_list()` (`optimizer/export/pdf.py`) grouped by
+  `(part.name, length, width)`, not dimensions alone — two parts with different names (e.g.
+  a left/right pair) but the exact same cut size got split into separate symbols. The sidebar
+  table has no Name column at all (Symbol/Length/Width/Qty only — confirmed by re-reading the
+  actual render), so the name was only ever affecting the *grouping*, never shown — dropped it
+  from the key entirely. The on-box label drawn on each individual part (`{symbol}.{name}`) is
+  unaffected: it already reads each part's own `name`, not a group-representative one, so two
+  differently-named parts sharing a symbol still show their own correct name on the sheet
+  itself. New regression test `test_cutting_list_merges_same_dims_across_different_names`
+  (`test_pdf.py`, suite 212→213) — verified it fails against the pre-fix grouping and passes
+  with the fix; the existing name-based test was renamed/re-commented (its own assertions were
+  already name-invariant, using the same name throughout, so it needed no behavior change).
+  Full suite green, no other tests depended on the old per-name split. No frontend changes.
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
@@ -1531,6 +1621,21 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
     documents, for the project owner to test-import independently and narrow down which half
     (and, if needed, which sheet within it) actually triggers the crash. Not started: acting
     on whatever the bisection narrows this down to.
+20. **"strips" waste strategy (pass 34) — tail-end sheets can be sparse, by design, not a bug,
+    but worth revisiting if it matters in practice.** Because each board is decided
+    independently (per the `while remaining:` loop `guillotine.py` already has, unchanged by
+    this pass), a job's very last few boards can end up holding only the "leftover" parts from
+    whichever width-groups didn't divide evenly into earlier boards, sometimes at much lower
+    utilization than the rest of the job (measured: 20% on a real job's 4th/last board for one
+    material, vs. 72–83% on the first 3) — confirmed this specific case is genuinely
+    unavoidable under "strictly single-width per strip" (the first 3 boards were independently
+    checked to already be using 95–98% of their own width, so there was nowhere else for the
+    leftover parts to go), but a smarter approach — deciding which strip instances go on which
+    board *globally* across the whole job at once, rather than greedily filling one board at a
+    time — could in principle spread leftover width-groups more evenly and reduce how often
+    this happens. Not attempted this pass (bigger scope, uncertain payoff, and the per-board
+    approach already keeps every board individually valid/simple) — a candidate follow-up if a
+    real job shows this being a recurring, material-relevant problem rather than a one-off.
 
 ---
 

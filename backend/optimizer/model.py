@@ -10,8 +10,14 @@ TargetMachine = Literal["saw", "nanxing"]
 # across the sheet. "edge": always splits along the same fixed axis (vertical), so leftover
 # space keeps accumulating into fewer, larger, edge-aligned free rectangles instead of thin
 # slivers wedged between parts (Updates/update_003.md, prompted by a real Nanxing layout
-# screenshot showing scattered slivers between placed drawer parts).
-WasteStrategy = Literal["balanced", "edge"]
+# screenshot showing scattered slivers between placed drawer parts). "strips": Panel Saw only
+# (optimizer/saw_packing.py) — groups parts by shared width into full-length vertical strips,
+# each strip holding only one width, parts simply stacked by length inside it. Trades some
+# material efficiency for a layout a human operator can cut with nothing but full-length strip
+# cuts plus simple crosscuts — never a cut that starts/stops mid-board. Confirmed against a real
+# MaxCut reference PDF the project owner uses for manual panel-saw work (2026-09-22); nanxing
+# never dispatches to this (see guillotine_split's own handling of an unrecognized value).
+WasteStrategy = Literal["balanced", "edge", "strips"]
 
 class EdgeSet(TypedDict):
     l1: str
