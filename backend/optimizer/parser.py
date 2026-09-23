@@ -35,11 +35,11 @@ SCHEMA_COLUMNS = {
         "NAME": "name",
         "Pos.#": "posId",
         "Barcode": "id",
-        "Length": "cutLength",
-        "Width": "cutWidth",
+        "Length": "finishedLength",
+        "Width": "finishedWidth",
         "Thickness": "thickness",
-        "Length2": "finishedLength",
-        "Width2": "finishedWidth",
+        "Length2": "cutLength",
+        "Width2": "cutWidth",
         "Thickness2": "_unused",
         "Top": "faceTop",
         "Bottom": "faceBottom",
@@ -137,17 +137,31 @@ def detect_schema(headers: list[str]) -> str | None:
     return None
 
 
-def build_part_from_row(row: dict[str, str]) -> Part:
+def build_part_from_row(row: dict[str, str], schema: str) -> Part:
     edges = normalize_edges(row)
     grain = parse_grain(row.get("Grain", ""))
+    if schema == "saw":
+        # Panel saw export: "Length"/"Width" are the finished (F.S.) size, and
+        # "Length2"/"Width2" are the actual cutting size (see conversation with
+        # the project owner, 2026-09-23) — the opposite pairing from the
+        # nesting schema below.
+        cut_length_raw = row.get("Length2", "0")
+        cut_width_raw = row.get("Width2", "0")
+        finished_length_raw = row.get("Length", "0")
+        finished_width_raw = row.get("Width", "0")
+    else:
+        cut_length_raw = row.get("Cutting Length", row.get("Length", "0"))
+        cut_width_raw = row.get("Cutting Width", row.get("Width", "0"))
+        finished_length_raw = row.get("Lenght", row.get("Length2", row.get("Length", "0")))
+        finished_width_raw = row.get("Width2", row.get("Width", row.get("Finished Width", "0")))
     return Part(
         id=clean_value(row.get("Barcode", row.get("id", ""))) or clean_value(row.get("Pos. barcode", "")),
         posId=clean_value(row.get("Pos. barcode", row.get("Pos.#", ""))) or "",
         name=clean_value(row.get("Part Name", row.get("NAME", ""))) or "",
-        cutLength=parse_number(row.get("Cutting Length", row.get("Length", "0"))),
-        cutWidth=parse_number(row.get("Cutting Width", row.get("Width", "0"))),
-        finishedLength=parse_number(row.get("Lenght", row.get("Length2", row.get("Length", "0")))),
-        finishedWidth=parse_number(row.get("Width2", row.get("Width", row.get("Finished Width", "0")))),
+        cutLength=parse_number(cut_length_raw),
+        cutWidth=parse_number(cut_width_raw),
+        finishedLength=parse_number(finished_length_raw),
+        finishedWidth=parse_number(finished_width_raw),
         thickness=parse_number(row.get("Panel Thickness", row.get("Thickness", "0"))),
         qty=max(parse_int(row.get("Qty", "1")), 1),
         material=clean_value(row.get("Material Name", row.get("Mate", ""))) or "",
@@ -186,7 +200,7 @@ def parse_csv_text(text: str) -> tuple[list[Part], list[str]]:
     parts: list[Part] = []
     for index, raw_row in enumerate(reader, start=2):
         row = {k: clean_value(v) for k, v in raw_row.items() if k is not None}
-        part = build_part_from_row(row)
+        part = build_part_from_row(row, schema)
         if part.cutLength <= 0 or part.cutWidth <= 0 or part.thickness <= 0:
             errors.append(
                 f"Row {index}: invalid dimensions length={part.cutLength}, width={part.cutWidth}, thickness={part.thickness}"

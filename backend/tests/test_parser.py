@@ -8,6 +8,11 @@ NESTING_HEADER = (
     "Core material,Edge 1,Edge 2,Edge 3,Edge 4,Grain\n"
 )
 
+SAW_HEADER = (
+    "Mate,NAME,Pos.#,Barcode,Length,Width,Thickness,Length2,Width2,Thickness2,"
+    "Top,Bottom,Edge 1,Edge 2,Edge 3,Edge 4,Qty\n"
+)
+
 
 def test_parses_saw_csv_with_no_errors(saw_parts):
     assert len(saw_parts) == 50
@@ -75,6 +80,29 @@ def test_rejects_non_positive_dimensions():
     assert parts == []
     assert errors
     assert "Row 2" in errors[0]
+
+
+def test_saw_schema_takes_cutting_size_from_length2_width2():
+    # Panel saw export: "Length"/"Width" hold the finished (F.S.) size, and
+    # "Length2"/"Width2" hold the actual cutting size — the opposite pairing from the
+    # nesting schema's "Cutting Length"/"Cutting Width" vs. "Lenght"/"Width" (see
+    # conversation with the project owner, 2026-09-23). Values below are deliberately
+    # distinct per column so a regression that reads the wrong pair is caught.
+    row = "Mr. Vijay,Part,01.X,X,111,222,17,333,444,17,,,,,,,1\n"
+    parts, errors = parse_csv_text(SAW_HEADER + row)
+    assert errors == []
+    part = parts[0]
+    assert (part.cutLength, part.cutWidth) == (333, 444)
+    assert (part.finishedLength, part.finishedWidth) == (111, 222)
+
+
+def test_nesting_schema_cutting_and_finished_size_unaffected():
+    row = "Mr. Vijay,01.X,X,Part,333,444,1,111,222,17,MAT,,,,,,,,0\n"
+    parts, errors = parse_csv_text(NESTING_HEADER + row)
+    assert errors == []
+    part = parts[0]
+    assert (part.cutLength, part.cutWidth) == (333, 444)
+    assert (part.finishedLength, part.finishedWidth) == (111, 222)
 
 
 def test_qty_expands_into_individual_placeable_units():
