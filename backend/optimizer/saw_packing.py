@@ -152,30 +152,34 @@ def _footprint(part: Part, rotated: bool) -> tuple[float, float]:
 @dataclass
 class _StripInstance:
     """One full-length vertical strip: a fixed local-x width shared by every part inside it,
-    with its parts simply stacked along local-y (length) in placement order."""
+    with its parts simply stacked along local-y (length) in placement order.
+
+    `nested` holds *other* (usually narrower, usually sparser) instances spliced into this
+    one's own leftover length instead of each claiming a full board-width column of their
+    own — see _absorb_slack's docstring. Bounded to exactly one level: a nested instance
+    never itself carries further nested instances."""
     width: float
     items: list[tuple[Part, bool, float, float]] = field(default_factory=list)  # (part, rotated, pw, ph)
     used: float = 0.0
+    nested: list["_StripInstance"] = field(default_factory=list)
 
 
-def _place_parts_on_board_strips(
-    parts: list[Part], board: StockBoard, margin: Margin, gap: float, allow_rotation: bool, sheet_index: int,
-) -> tuple[Sheet, list[Part]]:
-    """"strips" waste strategy: groups parts by shared width into full-length vertical strips —
-    every strip holds exactly one width, and its parts are just stacked by length inside it. An
-    operator manually cutting this only ever needs two kinds of cuts: a handful of full-length
-    strip cuts across the whole board, then plain crosscuts within each strip — never a cut that
-    starts or stops mid-board. Confirmed against a real MaxCut reference PDF the project owner
-    uses for manual panel-saw work (2026-09-22): its own layouts follow exactly this pattern.
-    This trades some material efficiency for that simplicity — measured on the real reference
-    job, MaxCut's own strip layout had *higher* wastage than this app's free-rectangle packer on
-    the same material/sheets, not lower — so this is an operator-convenience choice, not a
-    strict efficiency win, which is why it's opt-in rather than the default.
+def _build_strip_instances(
+    parts: list[Part], allow_rotation: bool, gap: float, width: float, height: float,
+) -> tuple[list[_StripInstance], set[str]]:
+    """Steps 1+2 of "strips" packing: pick each part's strip-width axis, then split each
+    resulting width-group into one or more same-width strip instances via first-fit-
+    decreasing on length. Returns (instances, unplaceable_part_ids) — a part whose own length
+    exceeds `height` in the only orientation its grain allows never joins any instance;
+    unplaceable_part_ids records exactly which ones, so a caller doing the *entire* job in one
+    pass (pack_all_strips) doesn't have to rediscover this by noticing an id never got placed.
+    A whole group whose *width* exceeds the board's own width (so no instance of it could
+    ever fit any board, empty or not) is excluded the same way, checked here rather than left
+    for the bin-packer to discover — `_bin_pack_instances` always finds *some* bin for an
+    instance it's given (opening a new one if needed), so it must never be handed something
+    that can't fit even a completely empty board.
     """
-    width = board.width - margin.left - margin.right
-    height = board.length - margin.top - margin.bottom
-
-    # Step 1: pick each part's (rotated, pw, ph). Grain-locked parts have only one valid
+    # Grain-locked parts have only one valid
     # footprint (_footprint's own grain-mandated split, can_rotate()==False for them) — used
     # as-is. grain="none" parts are free to run either raw dimension (cutLength or cutWidth)
     # along the strip-width axis, since nothing downstream of the panel saw's own PDF/preview
@@ -203,7 +207,19 @@ def _place_parts_on_board_strips(
     for part in parts:
         if allow_rotation and part.can_rotate():
             len_key, wid_key = round(part.cutLength, 1), round(part.cutWidth, 1)
-            if value_counts.get(wid_key, 0) > value_counts.get(len_key, 0):
+            # An orientation is only a candidate if it physically fits the board (strip width
+            # within board width, strip length within board length). Frequency alone must not
+            # pick an orientation that can never fit -- e.g. a 2262x832 part whose 2262 repeats
+            # elsewhere would otherwise become a 2262mm-wide strip and be rejected outright.
+            fits_as_is = part.cutLength + gap <= width + 1e-9 and part.cutWidth + gap <= height + 1e-9
+            fits_swapped = part.cutWidth + gap <= width + 1e-9 and part.cutLength + gap <= height + 1e-9
+            if fits_swapped and not fits_as_is:
+                swap = True
+            elif fits_as_is and not fits_swapped:
+                swap = False
+            else:
+                swap = value_counts.get(wid_key, 0) > value_counts.get(len_key, 0)
+            if swap:
                 assigned[part.id] = (True, part.cutWidth, part.cutLength)
             else:
                 assigned[part.id] = (False, part.cutLength, part.cutWidth)
@@ -220,7 +236,14 @@ def _place_parts_on_board_strips(
         groups.setdefault(round(pw, 1), []).append(part)
 
     all_instances: list[_StripInstance] = []
-    for group_parts in groups.values():
+    unplaceable_ids: set[str] = set()
+    for group_width, group_parts in groups.items():
+        if group_width + gap > width + 1e-9:
+            # This group's whole strip-width exceeds the board's own width -- no instance of
+            # it could ever fit any board, empty or not. Excluded before instance-building
+            # rather than left for _bin_pack_instances to (wrongly) accept anyway.
+            unplaceable_ids.update(p.id for p in group_parts)
+            continue
         ordered = sorted(group_parts, key=lambda p: -assigned[p.id][2])
         open_instances: list[_StripInstance] = []
         for part in ordered:
@@ -228,8 +251,9 @@ def _place_parts_on_board_strips(
             needed = ph + gap
             if needed > height + 1e-9:
                 # Doesn't fit this board's usable length in the only orientation this group
-                # allows it — leave it out of every instance; it stays in still_remaining, and
-                # the caller's genuinely-unplaceable handling takes over if that never changes.
+                # allows it -- genuinely unplaceable on any board of this size, not just this
+                # one; leave it out of every instance and record it directly.
+                unplaceable_ids.add(part.id)
                 continue
             target = next((inst for inst in open_instances if inst.used + needed <= height + 1e-9), None)
             if target is None:
@@ -239,38 +263,99 @@ def _place_parts_on_board_strips(
             target.used += needed
         all_instances.extend(open_instances)
 
-    # Step 3: decide which strip instances fit this board's width — widest first, but still
-    # scanning every remaining instance afterward rather than stopping at the first miss, so a
-    # later, narrower instance can still use whatever width is left. Simple and deterministic,
-    # not a provably optimal knapsack fill.
-    all_instances.sort(key=lambda inst: -inst.width)
-    accepted: list[_StripInstance] = []
-    used_width = 0.0
-    for inst in all_instances:
+    return all_instances, unplaceable_ids
+
+
+def _absorb_slack(instances: list[_StripInstance], gap: float, height: float) -> list[_StripInstance]:
+    """A bounded second cutting level: rather than let every instance's unused tail length
+    (`height - inst.used`) sit as pure waste, try to splice *other* instances into it —
+    side by side, within this instance's own width — instead of each claiming its own full
+    board-width column elsewhere.
+
+    This is exactly the structure a real MaxCut reference layout was found to use (decoded
+    directly from its own PDF geometry, 2026-09-23): one board-width column can hold a single
+    width for part of the board's length, then switch to several narrower parallel columns
+    for the rest — not one width held constant the full board length, which is what the
+    "strips" strategy's first cutting level alone produces. Nesting is bounded to exactly one
+    level deep (a nested instance never itself hosts further nested instances) so a real
+    operator only ever sees at most one extra round of cuts per column, never the unbounded
+    jagged tree the free-rectangle engine ("balanced"/"edge") was built to avoid.
+
+    Sparsest instances (least `used`, i.e. most flexible about whose slack they'll fit in)
+    are tried as guests first, against the fullest remaining instances as host candidates
+    first (since a full instance needs its own board-width column regardless, nesting a
+    guest into it is free). Absorbing a guest only ever *removes* it from the top-level
+    instance list handed to `_bin_pack_instances` — it can reduce the number of boards
+    needed, never increase it, and a run that finds nothing to absorb behaves identically to
+    before this function existed.
+    """
+    remaining_width = {id(inst): inst.width for inst in instances}
+    is_host = {id(inst): False for inst in instances}
+    absorbed: set[int] = set()
+    guest_order = sorted(instances, key=lambda inst: inst.used)
+    for guest in guest_order:
+        gid = id(guest)
+        if gid in absorbed or is_host[gid]:
+            # already nested elsewhere, or already hosting something itself -- nesting stays
+            # exactly one level deep, so a host can never also become a guest.
+            continue
+        # guest.used already bakes in a trailing gap after its own last item (see
+        # _build_strip_instances), and rendering (_build_sheet_from_instances) starts a
+        # nested guest immediately at the host's own y_cursor with no extra gap inserted --
+        # so the fit check below must match that exactly, not double-count a second gap.
+        needed_len = guest.used
+        host_candidates = sorted(
+            (inst for inst in instances if id(inst) != gid and id(inst) not in absorbed),
+            key=lambda inst: -inst.used,
+        )
+        for host in host_candidates:
+            hid = id(host)
+            slack = height - host.used
+            if needed_len <= slack + 1e-9 and guest.width + gap <= remaining_width[hid] + 1e-9:
+                host.nested.append(guest)
+                remaining_width[hid] -= guest.width + gap
+                is_host[hid] = True
+                absorbed.add(gid)
+                break
+    return [inst for inst in instances if id(inst) not in absorbed]
+
+
+def _bin_pack_instances(instances: list[_StripInstance], width: float, gap: float) -> list[list[_StripInstance]]:
+    """Step 3 of "strips" packing: first-fit-decreasing at the bin level — widest instance
+    first, into the first already-open bin with room; open a new bin only when none fits.
+    Returns *every* bin, not just the first — the caller decides how many of them to realize
+    as actual sheets in this pass (pack_all_strips: all of them; the legacy single-board
+    _place_parts_on_board_strips: only the first, for backward compatibility)."""
+    ordered = sorted(instances, key=lambda inst: -inst.width)
+    bins: list[list[_StripInstance]] = []
+    bin_used_width: list[float] = []
+    for inst in ordered:
         needed = inst.width + gap
-        if used_width + needed <= width + 1e-9:
-            accepted.append(inst)
-            used_width += needed
+        target_bin = next((bi for bi, uw in enumerate(bin_used_width) if uw + needed <= width + 1e-9), None)
+        if target_bin is None:
+            bins.append([inst])
+            bin_used_width.append(needed)
+        else:
+            bins[target_bin].append(inst)
+            bin_used_width[target_bin] += needed
+    return bins
 
-    placed_ids = {part.id for inst in accepted for part, *_ in inst.items}
-    still_remaining = [p for p in parts if p.id not in placed_ids]
 
-    # Re-order the *accepted* instances for x-placement by how much leftover length each one
-    # has (which was never a factor in the width-based accept decision above) — fullest first,
-    # emptiest last. Every instance's own leftover sits at the same edge (native y, top of its
-    # stack), so clustering the emptiest instances next to each other merges their leftovers
-    # into one contiguous region instead of scattering them. Real bug this fixes (reported via
-    # two rendered PDFs, 2026-09-22): a near-full instance sorted by width alone can land
-    # *between* two mostly-empty ones purely because its width happens to be a value between
-    # theirs, splitting what should be one reusable offcut into two disconnected, oddly-shaped
-    # scraps on opposite edges of the sheet. Doesn't reduce total leftover (that's fixed by the
-    # parts' own sizes) — only where it ends up relative to the other leftover on the sheet.
-    accepted.sort(key=lambda inst: height - inst.used)
+def _build_sheet_from_instances(
+    instances: list[_StripInstance], board: StockBoard, margin: Margin, width: float, height: float, gap: float,
+    sheet_index: int,
+) -> Sheet:
+    """Renders one bin's worth of strip instances into an actual Sheet: re-orders by leftover
+    length (fullest first) so the emptiest instances cluster together at one edge instead of
+    scattering their leftover space (see the "strips" docstring's own note on this), then lays
+    out x/y positions, offcuts, and utilization exactly as a single-board strips pass always
+    has."""
+    instances = sorted(instances, key=lambda inst: height - inst.used)
 
     placed_parts: list[PlacedPart] = []
     offcuts: list[Offcut] = []
     x_cursor = 0.0
-    for inst in accepted:
+    for inst in instances:
         y_cursor = 0.0
         for part, rotated, pw, ph in inst.items:
             placed_parts.append(
@@ -280,26 +365,120 @@ def _place_parts_on_board_strips(
                 )
             )
             y_cursor += ph + gap
+
+        # Second cutting level (see _absorb_slack): render any instances nested into this
+        # one's own leftover length side by side, fullest first, each in its own narrower
+        # x-sub-range within inst.width and its own y-range starting right after inst's own
+        # items -- never past this instance's own width or leftover length, so this can only
+        # ever consume space that would otherwise sit unused.
+        nested_x = x_cursor
+        nested_y_start = y_cursor
+        for guest in sorted(inst.nested, key=lambda g: -g.used):
+            guest_y = nested_y_start
+            for part, rotated, pw, ph in guest.items:
+                placed_parts.append(
+                    PlacedPart(
+                        partId=part.id, x=nested_x + margin.left, y=guest_y + margin.top, rotated=rotated,
+                        w=pw, h=ph, name=part.name, material=part.material, thickness=part.thickness,
+                        grain=part.grain,
+                    )
+                )
+                guest_y += ph + gap
+            guest_leftover = height - nested_y_start - guest.used
+            if guest_leftover > 1e-6:
+                offcuts.append(
+                    Offcut(x=nested_x + margin.left, y=guest_y + margin.top, w=guest.width, h=guest_leftover)
+                )
+            nested_x += guest.width + gap
+
         leftover_len = height - inst.used
         if leftover_len > 1e-6:
-            offcuts.append(Offcut(x=x_cursor + margin.left, y=inst.used + margin.top, w=inst.width, h=leftover_len))
+            unused_nested_width = inst.width - (nested_x - x_cursor)
+            if unused_nested_width > 1e-6:
+                offcuts.append(
+                    Offcut(x=nested_x + margin.left, y=inst.used + margin.top, w=unused_nested_width, h=leftover_len)
+                )
         x_cursor += inst.width + gap
 
-    leftover_width = width - used_width
+    leftover_width = width - x_cursor
     if leftover_width > 1e-6:
-        offcuts.append(Offcut(x=used_width + margin.left, y=margin.top, w=leftover_width, h=height))
+        offcuts.append(Offcut(x=x_cursor + margin.left, y=margin.top, w=leftover_width, h=height))
 
     board_area = width * height
     placed_area = sum(p.w * p.h for p in placed_parts)
     utilization = 0.0 if board_area <= 0 else round(placed_area / board_area * 100.0, 2)
 
-    return (
-        Sheet(
-            index=sheet_index, material=board.material, boardL=board.length, boardW=board.width,
-            thickness=board.thickness, placed=placed_parts, offcuts=offcuts, utilizationPct=utilization,
-        ),
-        still_remaining,
+    return Sheet(
+        index=sheet_index, material=board.material, boardL=board.length, boardW=board.width,
+        thickness=board.thickness, placed=placed_parts, offcuts=offcuts, utilizationPct=utilization,
     )
+
+
+def pack_all_strips(
+    parts: list[Part], board: StockBoard, margin: Margin, gap: float, allow_rotation: bool, start_sheet_index: int,
+) -> tuple[list[Sheet], list[Part]]:
+    """Packs an entire (material, thickness, grain) group's parts into as many "strips"
+    sheets as needed, in one pass, instead of the usual one-board-per-call loop
+    (`guillotine.py`'s `optimize()` dispatches here directly for `waste_strategy="strips"`,
+    bypassing `place_parts_on_board`'s normal `while remaining:` loop entirely for this case).
+
+    This exists because a board-by-board decision structurally can't do better than this:
+    each call to a single-board packer only ever sees "whatever's left" and has no way to
+    know how the instances it rejects will fare on a *later* board it hasn't planned yet --
+    real bug, reported via a rendered PDF showing several sheets at 80-90%+ wastage
+    (2026-09-23), traced to exactly this: a group's instances ending up stranded across
+    multiple near-empty boards purely because of processing-order accident across repeated
+    calls, not because that many boards were actually needed. Computing every board's
+    instance assignment in one bin-packing pass (from the *entire* remaining group at once)
+    fixes that structurally rather than tweaking the single-board heuristic further.
+    """
+    width = board.width - margin.left - margin.right
+    height = board.length - margin.top - margin.bottom
+    instances, unplaceable_ids = _build_strip_instances(parts, allow_rotation, gap, width, height)
+    instances = _absorb_slack(instances, gap, height)
+    bins = _bin_pack_instances(instances, width, gap)
+    sheets = [
+        _build_sheet_from_instances(bin_instances, board, margin, width, height, gap, start_sheet_index + i)
+        for i, bin_instances in enumerate(bins)
+    ]
+    unplaced = [p for p in parts if p.id in unplaceable_ids]
+    return sheets, unplaced
+
+
+def _place_parts_on_board_strips(
+    parts: list[Part], board: StockBoard, margin: Margin, gap: float, allow_rotation: bool, sheet_index: int,
+) -> tuple[Sheet, list[Part]]:
+    """Legacy single-board entry point for "strips" packing, kept for direct callers/tests
+    that want one board's worth at a time rather than `pack_all_strips`'s whole-group batch
+    (which is what `guillotine.py` actually uses now — see that function's own docstring for
+    why a single-board-per-call decision can't do as well). Realizes only the first bin from
+    `_bin_pack_instances`; the rest are folded back into `still_remaining` exactly as before,
+    with the whole `_build_strip_instances`/`_bin_pack_instances` computation simply redone
+    from scratch on whatever's left the next time this is called.
+    """
+    width = board.width - margin.left - margin.right
+    height = board.length - margin.top - margin.bottom
+    # Deliberately does NOT call _absorb_slack: this legacy function is only kept for direct
+    # single-board callers/tests, never for the real "strips" dispatch path (guillotine.py
+    # calls pack_all_strips directly, see its own docstring for why per-call, from-scratch
+    # regrouping already loses information a whole-group pass has). Adding slack absorption
+    # here too would just mask that same real gap for anyone still calling this directly.
+    instances, unplaceable_ids = _build_strip_instances(parts, allow_rotation, gap, width, height)
+    bins = _bin_pack_instances(instances, width, gap)
+    accepted = bins[0] if bins else []
+    sheet = _build_sheet_from_instances(accepted, board, margin, width, height, gap, sheet_index)
+    placed_ids = {
+        part.id
+        for inst in accepted
+        for part, *_ in inst.items + [item for guest in inst.nested for item in guest.items]
+    }
+    # Unplaceable parts (per unplaceable_ids) stay in still_remaining rather than being
+    # dropped here -- this legacy function has no separate "unplaced" return slot, so it
+    # relies on the same mechanism every other single-board packer does: the caller's
+    # `while remaining:` loop retries them on a fresh board, gets an empty sheet.placed
+    # again, and only then reports them unplaced.
+    still_remaining = [p for p in parts if p.id not in placed_ids]
+    return sheet, still_remaining
 
 
 def place_parts_on_board(

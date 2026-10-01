@@ -126,7 +126,7 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
 
 <!-- Update after each work block. This is what a fresh session needs most. -->
 
-- **Last worked:** 2026-09-22 — thirty-six passes across eight sessions (this session opened
+- **Last worked:** 2026-09-23 — thirty-eight passes across eight sessions (this session opened
   without the direct conversation history for passes 9–18 below — resumed entirely from this
   file, the auto-memory note on `DESKTOP_APP_PLAN.md`, and the actual repo state, which is
   exactly the point of keeping this file current). (1) Applied
@@ -1268,6 +1268,171 @@ M3's cut-sequence overlay was deliberately not built (see M3 row).
   heuristic) — verified it fails against the pre-fix width-only sort and passes with the fix.
   Full suite green. No frontend changes — this is purely an internal placement-order change
   within the existing `_place_parts_on_board_strips` function.
+  (37) A different real job's "strips" PDF showed several sheets at 84-90% wastage for two
+  materials (`GP_HDH_6_5900_BS`: 4 sheets, 41% avg utilization; `GP_HDH17_5900_BS`: 6 sheets,
+  42% avg utilization, one sheet at just 9.91%). Investigated by dumping every sheet's actual
+  strip-instance widths/lengths directly (same technique as passes 33/36) rather than
+  theorizing. Root cause, confirmed by direct comparison against `pack_all_strips` (this
+  pass's fix, see below): `guillotine.py`'s outer `while remaining:` loop called the
+  single-board strips packer repeatedly, and **each call re-ran Steps 1-2 (grouping +
+  length-instance-building) from scratch on whatever parts were still left** — for a
+  grain="none" part whose natural-width choice is a near-tie in `_build_strip_instances`'s
+  frequency heuristic, that tie can resolve differently once some of the *other* parts that
+  tipped it are gone (already placed on an earlier board), silently reassigning that part to
+  a different strip-width between the original full-group planning and the regenerated
+  leftover-only recomputation. Verified directly on the real job: recomputing instances on
+  just the leftover 82 of GP_HDH17's 130 parts (after removing sheet 1's 48) produced a
+  visibly different instance-width multiset than the original full computation's remaining
+  instances (e.g. "298.8"/"472.3" appearing only in the regenerated set, "138.8" only in the
+  original) — a hand-traceable but non-obvious mechanism, confirmed rather than assumed.
+  Constructed and verified a minimal 5-part synthetic reproduction of the exact same
+  mechanism (via automated random search over small part sets, not hand-derivation, once
+  hand-derivation proved too fragile to construct reliably): a part (750×550) is genuinely
+  tied between width=550 (favored 2-1 while another 550-wide part is still in the pool) and
+  width=750 (once that other part is gone); the 550-wide choice fits alongside a 500-wide
+  part on one board (1058mm of 1200mm usable), the 750-wide choice does not (1258mm) —
+  forcing a 3rd sheet a single whole-group pass never needs.
+
+  **Fix**: `optimizer/saw_packing.py` gained `pack_all_strips()`, which computes Steps 1-2
+  (via new helper `_build_strip_instances`) **once**, from the *entire* remaining
+  (material, thickness, grain) group at once, then bin-packs *every* resulting instance
+  across as many boards as needed in one first-fit-decreasing pass (new helper
+  `_bin_pack_instances`, returning every bin rather than just the first) before rendering
+  each bin as a Sheet (new helper `_build_sheet_from_instances`, reusing pass 36's leftover-
+  length x-ordering unchanged). `guillotine.py`'s `optimize()` now dispatches to
+  `pack_all_strips()` directly for `waste_strategy="strips"`, bypassing the normal one-
+  board-per-call loop entirely for that case (the loop is unchanged for "balanced"/"edge").
+  The old single-board `_place_parts_on_board_strips` is kept, refactored to share the same
+  three helpers and only realize bin 0 — direct callers/tests of it are unaffected, and it
+  remains available for anything that genuinely wants one board at a time. **Real bug found
+  and fixed while building this, before it ever reached measurement**: an early version of
+  `_bin_pack_instances` always found *some* bin for any instance it was given (opening a new
+  one if none fit) — which silently accepted a group whose own width exceeds the board's
+  entire width (should be impossible, but a synthetic test with a 5000mm-wide part caught it
+  immediately as an out-of-bounds placement, not just a missing check spotted by inspection).
+  Fixed by checking each *group's* width against the board's width in `_build_strip_instances`
+  itself, before any instance is ever built for it, routing straight to `unplaceable_ids`.
+
+  **Real, measured result**: `GP_HDH17_5900_BS` 6 sheets (42.24% avg utilization) → **4
+  sheets (63.37%)**; `GP_HDH_6_5900_BS` unchanged at 4 sheets (confirmed this specific
+  material's exact instance-width combination is genuinely stuck at 4 boards regardless of
+  packing order — several 3-bin packings come within 2mm of fitting and no closer). Job-wide:
+  11 sheets → **9 sheets**. Re-verified full geometry invariants on the regenerated job: all
+  186 parts placed, 0 unplaced, 0 overlaps, guillotine-decomposable throughout. Regenerated
+  the actual PDF and visually confirmed (`pdftoppm`) the previously-9.91%-utilization sheet
+  is gone, replaced by densely-packed 45-67%-range sheets. New tests in `test_saw_strips.py`
+  (+2): the minimal 5-part reproduction (asserts the old repeated-single-board-call path
+  needs 3 sheets, `pack_all_strips` needs 2, for the exact same parts) and the too-wide-group
+  rejection case — both verified to fail against the pre-fix code (the first via a hard
+  `ImportError` on the new function name, confirming the whole mechanism didn't exist before).
+  Full suite: 218→220 passing. No frontend changes.
+  (38) Even after pass 37's `pack_all_strips` fix, the project owner showed two more real
+  screenshots (`results/230920261137/26Y125_nesting-job-2026-09-23T05-54-16.pdf`, Layouts 7-8
+  of `GP_HDH17_5900_BS`) with hand-annotated red squiggly marks over large empty areas, and
+  gave an explicit instruction to "think deep and analyse before attempting to solve the
+  issue" rather than patch again, since repeated attempts hadn't resolved it. Did a from-
+  scratch quantitative + forensic investigation rather than another code change, and found
+  the real situation is two separate facts layered on top of each other, both confirmed by
+  direct computation/decoding, not assumption:
+
+  **Fact 1 — 4 sheets is the true mathematical minimum for this exact 130-part group under
+  the "strips" model's own rules, not a bin-packing quality gap.** Recomputed directly
+  against the real CSV (`26Y125(Qty15) Drawer...BACK_PANEL.csv`, `GP_HDH17_5900_BS`, 130
+  parts, margin=10mm all sides, kerf=4mm, usable board 1200×2420mm): `_build_strip_instances`
+  produces 24 strip instances totaling **4380.5mm** of width-demand against 1200mm/board →
+  `ceil(4380.5/1200) = 4` boards, confirmed by direct re-run. Checked every one of the 8
+  width-groups' instance count against its own mathematical floor
+  (`ceil(total_length_in_group / 2420mm)`) — only the 109.6mm-wide group (6 instances) is
+  provably above its floor (5); every other group is already at its floor, several within
+  30-60mm of the 2420mm boundary. Even a hypothetically perfect repack of just that one group
+  only drops total demand to 4266.9mm → `ceil(4266.9/1200)` is **still 4**. So no amount of
+  smarter bin-packing *within the current "one global width, full board length, no mixing"
+  rule* can get this real job below 4 sheets — the ceiling is the rule itself, not the
+  algorithm implementing it.
+
+  **Fact 2 — the MaxCut reference PDF the comparison was based on is for a different job.**
+  Read its own sidebar text directly rather than assuming it was the same data: "Job Sheets:
+  3", "Job Panels: **120**", cutting-list Length/Width values ~1.2mm off from the real CSV's
+  own cut sizes throughout (e.g. 198×451 vs. our 196.8×449.8), and at least one quantity that
+  doesn't match at all (531.5mm qty 2 there vs. 530.3mm qty **4** in the real CSV). 120 ≠ 130,
+  confirmed by direct text extraction, not eyeballing — this is a different cutting list that
+  happens to share the material name, so "MaxCut: 3 sheets, us: 4 sheets" was never a valid
+  apples-to-apples comparison at the data level regardless of anything else.
+
+  **Fact 3 — the deepest one, and the actual answer to "why can't we match MaxCut": decoded
+  MaxCut's own PDF rectangle geometry directly (`pypdf` content-stream `re` operators, not
+  the rendered image) and found MaxCut's real algorithm does NOT use a single global width
+  per full-board-length strip at all — the premise the whole "strips" feature (pass 34) was
+  built on.** Concrete evidence: at x=192.01pt, the upper 7 rows (y=329.72 to 680) are one
+  110.7pt-wide strip; directly below that (y=195.87, then y=83.37) the SAME x-span instead
+  holds **three** separate 35.45pt-wide sub-strips side by side (x=192.01, 229.51, 267.02),
+  exactly filling the width the single wide strip used above. That's textbook two-level
+  recursive guillotine cutting — a vertical zone cut creates a wide column, and *within* that
+  column a further horizontal cut opens a region that gets its own independent vertical
+  subdivision into narrower strips — not one width held constant top-to-bottom. `"strips"`'s
+  own explicit design (pass 34, confirmed via `AskUserQuestion` at the time: "strictly
+  single-width per strip, no mixing") is a stricter, simpler special case of what MaxCut
+  itself actually does, which is exactly why it structurally can't reach MaxCut's own
+  density on jobs with a wide mix of part sizes like this one — this isn't a bug in
+  `pack_all_strips`, it's a ceiling built into the feature's own founding assumption.
+
+  **Decided and implemented, same pass**: given the choice between keeping pure single-width
+  strips or growing a bounded second cutting level, the project owner picked the latter.
+  Added `optimizer/saw_packing.py`'s `_absorb_slack(instances, gap, height)`, run between
+  `_build_strip_instances` and `_bin_pack_instances` in `pack_all_strips` (the real
+  "strips" dispatch path; deliberately *not* wired into the legacy single-board
+  `_place_parts_on_board_strips`, so pass 37's own regression test — proving whole-group
+  planning beats per-board-fresh regrouping — keeps discriminating between the two rather
+  than being masked by this new mechanism). For every instance's own unused tail length
+  (`height - inst.used`), tries to splice in *other* instances side by side within that
+  same width budget instead of leaving it as pure waste — bounded to exactly one level deep
+  (`_StripInstance` gained a `nested` field; a nested instance is disqualified from ever
+  hosting anything itself, so no operator ever sees more than one extra round of cuts per
+  column). Sparsest instances (least `used`, hence most flexible about whose slack they'll
+  fit) are tried as guests first, against the fullest remaining instances as hosts first
+  (a full instance needs its own board-width column regardless, so nesting into it is
+  free). Absorbing a guest only ever *removes* it from the top-level list handed to
+  `_bin_pack_instances` — provably can't increase board count, only reduce it, and a run
+  that finds nothing to absorb is behaviorally identical to before. `_build_sheet_from_
+  instances` renders nested guests directly below their host's own last item, narrowest-
+  budget-first among any siblings, with matching offcuts for whatever length/width still
+  isn't used.
+
+  **Real, measured result on the exact reported job** (`26Y125` CSV, 130-part
+  `GP_HDH17_5900_BS` group): re-ran the same computation used for Fact 1's floor analysis —
+  24 top-level instances collapsed to **17** after absorption (7 nested), total width-demand
+  dropped from 4380.5mm to **3498.9mm**, crossing the 3-board threshold: `ceil(3498.9/1200) =
+  3`, down from 4. Confirmed end-to-end through the real optimizer (not just the instance
+  math): `GP_HDH17_5900_BS` now nests into **3 sheets at 93.1%/78.69%/81.67% utilization**
+  (avg 84.49%, up from pass 37's 63.37%) — independently reaching the same 3-sheet count the
+  project owner originally expected from the (data-mismatched) MaxCut comparison, this time
+  on our own actual 130-part job's own real merits. `GP_HDH_6_5900_BS` also dropped 4→3
+  sheets in the same run (avg 54.63%, still the more constrained material). Job-wide: 9→**7**
+  sheets. Re-verified full invariants on the regenerated job: all 186 parts placed, 0
+  unplaced, 0 overlaps, every sheet still guillotine-cuttable (confirmed the nested structure
+  is exactly a valid recursive guillotine partition: isolate each top-level column with a
+  vertical cut, then one horizontal cut splits a host's own content from its nested region,
+  then further vertical cuts separate any sibling guests within that region). Rendered and
+  visually inspected the actual PDF (`pdftoppm`) for the regenerated job to confirm the
+  layout isn't just numerically correct but visually sane.
+
+  4 tests in `test_saw_strips.py` needed updating for the new, deliberately-relaxed
+  invariant (nesting can put two different widths at the same x, at disjoint y-ranges) —
+  `test_every_strip_is_a_single_width_no_mixing` renamed and rewritten to allow at most 2
+  widths per column with disjoint y-ranges; the others (`orphan_width_gets_its_own_strip`,
+  the pass-36 leftover-ordering test, the pass-37 whole-group-vs-repeated-calls test) needed
+  **no assertion changes at all** once `_absorb_slack` was scoped to `pack_all_strips` only —
+  confirming the decision to keep it out of the legacy single-board path was the right call,
+  not just a workaround. Added 4 new tests (`test_absorb_slack_nests_a_sparse_group_into_a_
+  fuller_hosts_leftover_length`, `test_absorb_slack_never_nests_two_levels_deep`,
+  `test_absorb_slack_reduces_real_job_board_width_demand`, plus the rewritten single-width
+  test) — verified the two-levels-deep guard has teeth by hand-tracing the constructed case
+  (C can only reach a host by direct assignment, never routed through B, since B is
+  disqualified as a host once absorbed itself). Full suite: 228 passing (unchanged pre-
+  existing 5 failed/32 errors, all the stale `sample_data` golden-XML path issue from
+  "Remaining work" item 5 — confirmed untouched by this pass, same count before and after).
+  No frontend changes — `waste_strategy="strips"` needed no new parameters or UI wiring, the
+  improvement is entirely internal to the packer.
   Before all eighteen prior passes: Phases A/B/C of
   `~/.claude/plans/delegated-moseying-robin.md` complete, plus follow-on M6, M7, and
   Nanxing-packer-efficiency passes (same plan file, rewritten fresh for each pass), prompted by
@@ -1661,21 +1826,29 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
     documents, for the project owner to test-import independently and narrow down which half
     (and, if needed, which sheet within it) actually triggers the crash. Not started: acting
     on whatever the bisection narrows this down to.
-20. **"strips" waste strategy (pass 34) — tail-end sheets can be sparse, by design, not a bug,
-    but worth revisiting if it matters in practice.** Because each board is decided
-    independently (per the `while remaining:` loop `guillotine.py` already has, unchanged by
-    this pass), a job's very last few boards can end up holding only the "leftover" parts from
-    whichever width-groups didn't divide evenly into earlier boards, sometimes at much lower
-    utilization than the rest of the job (measured: 20% on a real job's 4th/last board for one
-    material, vs. 72–83% on the first 3) — confirmed this specific case is genuinely
-    unavoidable under "strictly single-width per strip" (the first 3 boards were independently
-    checked to already be using 95–98% of their own width, so there was nowhere else for the
-    leftover parts to go), but a smarter approach — deciding which strip instances go on which
-    board *globally* across the whole job at once, rather than greedily filling one board at a
-    time — could in principle spread leftover width-groups more evenly and reduce how often
-    this happens. Not attempted this pass (bigger scope, uncertain payoff, and the per-board
-    approach already keeps every board individually valid/simple) — a candidate follow-up if a
-    real job shows this being a recurring, material-relevant problem rather than a one-off.
+20. **"strips" waste strategy (pass 34) — tail-end sheets can be sparse.** ~~Because each
+    board is decided independently~~ **— largely resolved by pass 37's `pack_all_strips()`,
+    see that pass for the full writeup.** Originally: because each board was decided
+    independently (`guillotine.py`'s `while remaining:` loop calling the single-board strips
+    packer repeatedly), a job's very last few boards could end up holding only the "leftover"
+    parts from whichever width-groups didn't divide evenly into earlier boards. Pass 37 found
+    the mechanism was actually *worse* than plain per-board greediness: each repeated call
+    re-ran the grouping heuristic from scratch on whatever was left, which could silently
+    reassign a grain="none" part to a *different* strip-width than the original full-group
+    plan had chosen (a frequency-tie flipping once the parts that tipped it were gone),
+    fragmenting sheets far more than genuinely necessary — confirmed via a real job
+    (`GP_HDH17_5900_BS`: 6 sheets/42% avg utilization → 4 sheets/63%). `pack_all_strips()`
+    computes every instance for a whole (material, thickness, grain) group once and bin-packs
+    all of them across as many boards as needed in one pass, eliminating that specific
+    mechanism. **Not fully eliminated**: `GP_HDH_6_5900_BS` in the same real job stayed at 4
+    sheets even after the fix — confirmed by hand-trace this specific instance-width
+    combination is genuinely stuck at 4 boards regardless of arrangement (several 3-bin
+    packings come within 2mm of fitting and no closer), a true mathematical floor rather than
+    an algorithmic gap. A still-more-global approach (jointly deciding across *multiple*
+    materials/boards, or reshaping which parts join which width-group specifically to improve
+    bin-packability) remains a theoretical, unexplored ceiling above what pass 37 reaches, but
+    given pass 37 already closed the *actual observed* real-world gap, not pursued further
+    without new evidence it's still needed.
     **Pass 36 fixed a related but distinct issue** — a near-full instance could land width-wise
     *between* two mostly-empty ones purely by width-sort coincidence, splitting one reusable
     offcut into two disconnected scraps (see that pass for the full writeup) — by sorting
@@ -1685,6 +1858,31 @@ formatted like the reference. A valid empty job is a self-closed root `<FccRoot 
     instances, which pass 36 confirmed by hand-trace is mathematically fixed by the parts'
     own sizes regardless of packing order — still an open, unsolved sub-problem, distinct from
     both this item's tail-sheet-sparsity issue and pass 36's now-fixed ordering issue.
+21. **"strips"'s founding assumption — pure single-width-per-full-length-strip — does not
+    match what MaxCut's own reference layouts actually do (pass 38, 2026-09-23).** Real
+    machine-adjacent evidence (a fresh 130-part `GP_HDH17_5900_BS` job) showed "strips" still
+    needing 4 sheets where the project owner expected 3 based on a MaxCut PDF for the "same"
+    material. Investigated deeply (explicitly requested: "think deep and analyse before
+    attempting to solve") rather than patching again, and found: (a) 4 sheets is the real
+    mathematical floor for this exact job under strips' current rules (24 instances, 4380.5mm
+    total width-demand ÷ 1200mm/board = ceil 4; even a perfect repack of the one sub-optimal
+    width-group only gets to 4266.9mm, still ceil 4) — so no bin-packing refinement within the
+    existing rule can close this specific gap; (b) the MaxCut PDF being compared against is
+    for a *different* cutting list (120 job panels vs. our 130, dimensions ~1.2mm off
+    throughout, at least one quantity that doesn't match at all) — not a valid direct
+    comparison; and (c), the actual explanation: decoding MaxCut's own PDF rectangle geometry
+    directly (not the rendered image) proved MaxCut itself uses genuine two-level recursive
+    guillotine cutting, not a single width held constant the full board length — a wide
+    column near the top of one real sheet splits into three separate narrower sub-strips
+    lower down the *same* x-span. `"strips"` (pass 34) was built on the assumption that MaxCut
+    produces pure single-width full-length strips; it doesn't, which is exactly why a feature
+    built on that stricter assumption can't reach MaxCut's own density on a job with a wide
+    mix of part sizes. This is a founding-assumption gap, not an implementation bug.
+    **Resolved, same pass**: the project owner chose to grow a bounded second cutting level
+    rather than keep pure single-width strips — implemented as `_absorb_slack()`, see the
+    "Last worked" pass-38 entry's second half for the full mechanism, safety argument, and
+    real measured result (`GP_HDH17_5900_BS`: 4→**3** sheets, 63.37%→84.49% avg utilization;
+    job-wide 9→**7** sheets on the exact reported CSV).
 
 ---
 

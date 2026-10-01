@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .model import CutInstruction, Margin, OptResult, Part, Sheet, StockBoard, WasteStrategy
 from .placement import DEFAULT_PLACEMENT_CORNER, PlacementCorner, mirror_sheet
-from .saw_packing import place_parts_on_board
+from .saw_packing import pack_all_strips, place_parts_on_board
 
 
 def build_cuts_for_sheet(sheet: Sheet, board: StockBoard, margin: Margin) -> list[CutInstruction]:
@@ -41,6 +41,19 @@ def optimize(
         # never share a sheet with a different grain requirement, even on the same board type
         for grain in sorted({part.grain for part in board_parts}):
             remaining = [part for part in board_parts if part.grain == grain]
+            if waste_strategy == "strips":
+                # Whole-group batch pack rather than the usual one-board-per-call loop below —
+                # a board-by-board decision structurally can't plan around instances it hasn't
+                # seen yet on a later board. See pack_all_strips's own docstring for the real
+                # bug (several sheets at 80-90%+ wastage) this fixes.
+                new_sheets, group_unplaced = pack_all_strips(remaining, board, margin, kerf, allow_rotation, sheet_index)
+                for sheet in new_sheets:
+                    sheet = mirror_sheet(sheet, board, margin, placement_corner)
+                    sheets.append(sheet)
+                    cuts.extend(build_cuts_for_sheet(sheet, board, margin))
+                    sheet_index += 1
+                unplaced.extend(group_unplaced)
+                continue
             while remaining:
                 sheet, still_remaining = place_parts_on_board(remaining, board, margin, kerf, allow_rotation, sheet_index, waste_strategy)
                 if not sheet.placed:

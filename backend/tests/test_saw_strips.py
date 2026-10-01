@@ -6,7 +6,7 @@ import pytest
 
 from optimizer.guillotine import optimize as saw_optimize
 from optimizer.model import Margin, Part, StockBoard
-from optimizer.saw_packing import _place_parts_on_board_strips
+from optimizer.saw_packing import _absorb_slack, _build_strip_instances, _place_parts_on_board_strips, pack_all_strips
 
 from .helpers import is_guillotine_cuttable, overlapping_pairs
 
@@ -49,16 +49,92 @@ def test_strips_mode_is_guillotine_cuttable_and_overlap_free(saw_parts, default_
         assert is_guillotine_cuttable(sheet.placed)
 
 
-def test_every_strip_is_a_single_width_no_mixing(saw_parts, default_margin):
-    # The core promise of this mode: every physical strip (same x) holds parts of exactly one
-    # width -- never two different widths side by side within what looks like one column.
+def test_strip_column_is_single_width_or_hosts_one_disjoint_nested_width(saw_parts, default_margin):
+    # Pass 38 (2026-09-23): decoding a real MaxCut reference PDF's own rectangle geometry
+    # directly showed MaxCut itself does NOT hold one width constant the full board length --
+    # a column can switch to a different, narrower width partway down once its own first-level
+    # content runs out, rather than leaving that leftover length as pure waste. "strips" grew a
+    # bounded, exactly-one-level-deep version of this (_absorb_slack): a column may host at
+    # most one nested (narrower) width below its own first-level content, never more, and never
+    # overlapping it in y -- still a shallow, human-followable cut tree, just no longer a hard
+    # single-width-for-the-full-length promise.
     stock = [StockBoard(material=m, length=2440, width=1220, thickness=t, grain="none")
              for m, t in sorted({(p.material, p.thickness) for p in saw_parts})]
     result = saw_optimize(saw_parts, stock, default_margin, kerf=4.0, allow_rotation=True, waste_strategy="strips")
     for sheet in result.sheets:
         for x, parts_in_column in _columns(sheet.placed).items():
             widths = {round(p.w, 1) for p in parts_in_column}
-            assert len(widths) == 1, f"strip at x={x} mixes widths {widths}"
+            assert len(widths) <= 2, f"strip at x={x} mixes more than 2 widths {widths}"
+            if len(widths) == 2:
+                by_width: dict[float, list] = defaultdict(list)
+                for p in parts_in_column:
+                    by_width[round(p.w, 1)].append(p)
+                (group_a, group_b) = by_width.values()
+                a_lo, a_hi = min(p.y for p in group_a), max(p.y + p.h for p in group_a)
+                b_lo, b_hi = min(p.y for p in group_b), max(p.y + p.h for p in group_b)
+                assert a_hi <= b_lo + 1e-6 or b_hi <= a_lo + 1e-6, (
+                    f"strip at x={x} overlaps two different widths in y: {group_a} vs {group_b}"
+                )
+
+
+def test_absorb_slack_nests_a_sparse_group_into_a_fuller_hosts_leftover_length():
+    # A minimal, hand-verified case: a 500x333 "host" part leaves ~2087mm of unused length in
+    # its own 2420mm-usable column -- easily enough to hold a whole separate, sparse 80mm-wide
+    # group (two short parts, ~658mm total) that would otherwise need its own dedicated
+    # board-width column. Confirms the merge actually happens (2 instances in, 1 out) and that
+    # the survivor is the fuller one hosting the sparser one, not the reverse.
+    # grain="width" pins pw=cutLength, ph=cutWidth (_footprint never swaps a locked part).
+    width, height, gap = 1200.0, 2420.0, 4.0
+    parts = [
+        _part(cutLength=500.0, cutWidth=333.0, grain="width", id="HOST"),
+        _part(cutLength=80.0, cutWidth=300.0, grain="width", id="A1"),
+        _part(cutLength=80.0, cutWidth=350.0, grain="width", id="A2"),
+    ]
+    instances, unplaceable = _build_strip_instances(parts, True, gap, width, height)
+    assert unplaceable == set()
+    assert len(instances) == 2
+    reduced = _absorb_slack(instances, gap, height)
+    assert len(reduced) == 1
+    host = reduced[0]
+    assert host.width == 500.0  # grain="width" -> pw=cutLength, so HOST's own strip-width is 500
+    assert len(host.nested) == 1
+    assert host.nested[0].width == 80.0
+    assert {p.id for p, *_ in host.nested[0].items} == {"A1", "A2"}
+
+
+def test_absorb_slack_never_nests_two_levels_deep():
+    # A host that has itself absorbed a guest must never also become someone else's guest --
+    # nesting stays bounded to exactly one extra level. A is the fullest/widest instance and
+    # has ample slack (length) and width budget to directly host both B and C; B is itself
+    # sized so it *could* have hosted C by length alone (2420-154=2266 >> C's 104) if chaining
+    # were allowed -- confirms C lands as A's guest (or standalone), never routed through B.
+    width, height, gap = 1200.0, 2420.0, 4.0
+    parts = [
+        _part(cutLength=300.0, cutWidth=2000.0, grain="width", id="A"),
+        _part(cutLength=100.0, cutWidth=150.0, grain="width", id="B"),
+        _part(cutLength=100.0, cutWidth=100.0, grain="width", id="C"),
+    ]
+    instances, unplaceable = _build_strip_instances(parts, True, gap, width, height)
+    assert unplaceable == set()
+    reduced = _absorb_slack(instances, gap, height)
+    for inst in reduced:
+        for guest in inst.nested:
+            assert guest.nested == []  # a nested instance must never itself host anything
+
+
+def test_absorb_slack_reduces_real_job_board_width_demand(saw_parts, default_margin):
+    # Real-job sanity check, not just the hand-built cases above: on the project's own saw
+    # fixture, absorbing sparse instances into fuller hosts' leftover length must never increase
+    # total top-level board-width demand versus not absorbing at all, and should reduce it
+    # whenever any instance has meaningful slack.
+    width = 1220.0 - default_margin.left - default_margin.right
+    height = 2440.0 - default_margin.top - default_margin.bottom
+    instances, _ = _build_strip_instances(saw_parts, True, 4.0, width, height)
+    before_demand = sum(inst.width + 4.0 for inst in instances)
+    reduced = _absorb_slack(instances, 4.0, height)
+    after_demand = sum(inst.width + 4.0 for inst in reduced)
+    assert after_demand <= before_demand
+    assert len(reduced) <= len(instances)
 
 
 def test_parts_group_by_whichever_raw_dimension_repeats_more():
@@ -178,6 +254,66 @@ def test_real_job_drops_nothing_and_beats_naive_sheet_count(saw_parts, default_m
     assert len(strips.sheets) <= len(balanced.sheets) * 2  # sanity bound, not a tight efficiency claim
 
 
+def test_pack_all_strips_beats_repeated_single_board_calls():
+    # Real bug (reported via a rendered PDF showing several sheets at 80-90%+ wastage,
+    # 2026-09-23): guillotine.py used to call the single-board strips packer repeatedly, each
+    # time re-running Steps 1-2 from scratch on whatever parts were still left. For a
+    # grain="none" part whose own natural-width choice is a near-tie (see
+    # _build_strip_instances's frequency heuristic), that tie can be broken one way when the
+    # *full* remaining group is visible and the *other* way once some group members have
+    # already been placed on an earlier board and are no longer in the pool -- silently
+    # changing that part's chosen strip-width between the original planning pass and the
+    # regenerated one. This 5-part case reproduces exactly that: P0 (750x550) is genuinely
+    # ambiguous between width=550 (tied 2-1 in its favor while P6, width=550, is still
+    # present) and width=750 (once P6 is gone). P6 legitimately gets placed on sheet 1
+    # alongside P7/P8; recomputing from scratch on just [P0, P2] afterward flips P0 to
+    # width=750, which no longer fits alongside P2 (500 wide) on one board (754+504=1258mm >
+    # 1200mm usable) the way width=550 would have (554+504=1058mm) -- forcing a 3rd sheet
+    # that a single whole-group bin-packing pass never needed.
+    board = StockBoard(material="MAT", length=2440, width=1220, thickness=18.0, grain="none")
+    margin = Margin(top=10, right=10, bottom=10, left=10)
+    parts = [
+        _part(cutLength=750.0, cutWidth=550.0, id="P0"),
+        _part(cutLength=500.0, cutWidth=250.0, id="P2"),
+        _part(cutLength=550.0, cutWidth=150.0, id="P6"),
+        _part(cutLength=700.0, cutWidth=400.0, id="P7"),
+        _part(cutLength=150.0, cutWidth=150.0, id="P8"),
+    ]
+
+    remaining = parts
+    old_sheet_count = 0
+    while remaining:
+        sheet, still = _place_parts_on_board_strips(remaining, board, margin, 4.0, True, old_sheet_count + 1)
+        if not sheet.placed:
+            break
+        old_sheet_count += 1
+        remaining = still
+    assert remaining == []  # every part is placeable; this is purely a packing-quality gap
+
+    new_sheets, unplaced = pack_all_strips(parts, board, margin, 4.0, True, 1)
+    assert unplaced == []
+    assert len(new_sheets) < old_sheet_count
+    assert len(new_sheets) == 2
+    assert old_sheet_count == 3
+    for sheet in new_sheets:
+        assert overlapping_pairs(sheet.placed) == 0
+        assert is_guillotine_cuttable(sheet.placed)
+
+
+def test_pack_all_strips_rejects_a_group_wider_than_the_board_itself():
+    # Real regression caught while building pack_all_strips: _bin_pack_instances always finds
+    # *some* bin for an instance it's given (opening a new one if none of the existing ones
+    # fit), so it must never be handed an instance whose own width exceeds the board's --
+    # otherwise it gets placed anyway, out of bounds. cutWidth=5000 here is deliberately wider
+    # than the whole board (1220mm) in either orientation.
+    board = StockBoard(material="MAT", length=2440, width=1220, thickness=18.0, grain="none")
+    margin = Margin(top=10, right=10, bottom=10, left=10)
+    parts = [_part(cutLength=80.0, cutWidth=5000.0, id="TOO_WIDE")]
+    sheets, unplaced = pack_all_strips(parts, board, margin, 4.0, True, 1)
+    assert sheets == []
+    assert [p.id for p in unplaced] == ["TOO_WIDE"]
+
+
 def test_nanxing_ignores_strips_and_falls_back_safely(nesting_parts, default_margin):
     # "strips" is Panel Saw only (optimizer/saw_packing.py) -- nanxing_packing.py has no
     # dispatch for it at all, so guillotine_split (shared by both modules) must fall back to its
@@ -189,3 +325,15 @@ def test_nanxing_ignores_strips_and_falls_back_safely(nesting_parts, default_mar
     assert result.unplaced == []
     for sheet in result.sheets:
         assert overlapping_pairs(sheet.placed) == 0
+
+
+def test_frequent_dimension_wider_than_board_is_not_chosen_as_strip_width():
+    # Real regression (results/300920261305): two 2262-long parts made 2262 the "most repeated"
+    # dimension, so 2262x832 / 2262x407 were grouped into 2262mm-wide strips, wider than the
+    # 1220mm board, and rejected as unplaceable even though rotated they fit easily.
+    parts = [_part(2262, 832, id="A"), _part(2262, 407, id="B"), _part(2167, 822, id="C"), _part(2167, 402, id="D")]
+    sheets, unplaced = pack_all_strips(parts, _BOARD, _MARGIN, 4.0, True, 1)
+    assert unplaced == []
+    assert sum(len(s.placed) for s in sheets) == 4
+    for s in sheets:
+        assert overlapping_pairs(s.placed) == 0
